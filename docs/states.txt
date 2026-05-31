@@ -1,0 +1,11 @@
+Menu bar:  🔵 2          (aggregate icon + count of running/attention tasks)
+           └─────────────────────────────────────────────┐
+            Claude Code  ·  2 tasks                       │
+           ─────────────────────────────────────────────  │
+            🔵  claude-statusbar    Running · just now   ▸ │ → submenu:
+            🟡  frontend            Needs input · 3m ago ▸ │     Build the status bar app
+           ─────────────────────────────────────────────  │     • running Bash
+            Refresh                                    ⌘R  │     ⚠️ last error: ...
+            Quit                                       ⌘Q  │     /Users/demo/workspace/...
+                                                           │     Open Folder in Finder
+                                                           │     Open Folder in Terminal

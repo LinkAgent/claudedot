@@ -1,0 +1,18 @@
+.DS_Store
+
+# Build output
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Swift / Xcode local state
+.build/
+DerivedData/
+*.xcuserdata/
+
+# Editor / local environment
+.env
+.env.*
+*.swp

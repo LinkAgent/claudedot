@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Dot</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  /* ══════════════════════════════════════════════════════════════════════
+     DESIGN TOKENS
+     All colors are CSS variables scoped to [data-theme]. Switch the attr on
+     <html> to retheme everything; no other CSS changes needed.
+       --canvas-*  page backdrop (demo only)      --ink / -2 / -3  text tiers
+       --surface   popover background             --accent / -2   Claude orange
+       --raise     hover / input background       --green         done state
+       --border / -soft  hairlines & dividers
+     Fonts: Newsreader (serif) = display/body · JetBrains Mono = numbers,
+     paths, keycaps · -apple-system = small UI labels.
+     ══════════════════════════════════════════════════════════════════════ */
+
+  /* ── Light (Claude app cream) ── */
+  [data-theme="light"]{
+    --canvas-a:#E4DECF; --canvas-b:#D2CCBD;
+    --surface:#F7F4EC; --raise:#FBFAF5;
+    --border:#E3DCCB; --border-soft:#EBE5D7;
+    --ink:#2B2A27; --ink-2:#6B6760; --ink-3:#9A968C;
+    --accent:#E96945; --accent-2:#D99A82;
+    --green:#6B8E5E;
+    --code-bg:rgba(180,165,135,0.18);
+    --menubar-bg:rgba(255,255,255,0.45);
+    --shadow:0 12px 40px rgba(80,70,55,0.18);
+    --ring-run:rgba(154,150,140,0.45);
+  }
+  /* ── Dark (Claude app warm charcoal) ── */
+  [data-theme="dark"]{
+    --canvas-a:#1f1e1b; --canvas-b:#141310;
+    --surface:#1f1f1e; --raise:#2e2c26;
+    --border:#3a382f; --border-soft:#322f29;
+    --ink:#ECE8DD; --ink-2:#A8A399; --ink-3:#6F6B61;
+    --accent:#E96945; --accent-2:#9c5238;
+    --green:#7a9b76;
+    --code-bg:rgba(0,0,0,0.28);
+    --menubar-bg:rgba(255,255,255,0.05);
+    --shadow:0 20px 60px rgba(0,0,0,0.6);
+    --ring-run:rgba(168,163,153,0.4);
+  }
+
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased;}
+  body{
+    font-family:"Newsreader",Georgia,serif;
+    background:var(--canvas-b);
+    background-image:radial-gradient(1000px 600px at 50% -5%, var(--canvas-a), var(--canvas-b) 70%);
+    min-height:100vh;display:flex;flex-direction:column;align-items:center;
+    padding:30px 20px 64px;color:var(--ink);
+    transition:background-color .35s ease, color .35s ease;
+  }
+
+  /* theme toggle */
+  .toggle{position:fixed;top:18px;right:18px;display:flex;gap:2px;background:var(--menubar-bg);
+    border:0.5px solid var(--border);border-radius:9px;padding:3px;backdrop-filter:blur(20px);
+    font-family:-apple-system,sans-serif;z-index:10;}
+  .toggle button{border:none;background:none;color:var(--ink-3);font-size:11px;padding:5px 11px;
+    border-radius:6px;cursor:pointer;transition:.15s;letter-spacing:.2px;}
+  .toggle button.on{background:var(--surface);color:var(--ink);}
+
+  .menubar{width:100%;max-width:720px;height:24px;background:var(--menubar-bg);
+    border:0.5px solid var(--border);border-radius:7px;display:flex;align-items:center;
+    justify-content:flex-end;padding:0 13px;gap:18px;margin-bottom:9px;font-size:12px;
+    color:var(--ink-2);font-family:-apple-system,"SF Pro Text",sans-serif;backdrop-filter:blur(20px);}
+  .menubar .live{display:flex;align-items:center;gap:6px;color:var(--ink);font-weight:500;}
+  .menubar .glyph{color:var(--accent);font-size:13px;}
+  .connector{width:1px;height:13px;background:var(--border);margin-bottom:-1px;}
+
+  .pop{
+    width:336px;background:var(--surface);
+    border:0.5px solid var(--border);border-radius:16px;
+    box-shadow:var(--shadow);overflow:hidden;
+    transition:background-color .35s ease, border-color .35s ease;
+  }
+  .pop > *{opacity:0;animation:rise .5s cubic-bezier(.2,.7,.2,1) forwards;}
+  .pop > *:nth-child(1){animation-delay:.04s}
+  .pop > *:nth-child(2){animation-delay:.10s}
+  .pop > *:nth-child(3){animation-delay:.16s}
+  .pop > *:nth-child(4){animation-delay:.22s}
+  @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+  .head{padding:16px 18px 13px;display:flex;align-items:center;}
+  .head .mark{font-size:21px;font-weight:500;letter-spacing:-.2px;line-height:1;display:flex;align-items:center;gap:9px;}
+  .head .mark .word{display:inline;}
+  .head .mark .spark{color:var(--accent);font-size:15px;}
+  .head .mark .dot{color:var(--accent);}
+  .head .right{margin-left:auto;text-align:right;font-family:-apple-system,sans-serif;}
+  .head .right .n{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink);font-weight:500;margin-top:3px;}
+  .head .right .lbl{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--ink-3);}
+
+  .usage{padding:3px 18px 17px;}
+  .usage .top{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:12px;}
+  .usage .pct{font-size:44px;font-weight:400;line-height:.82;letter-spacing:-1.5px;color:var(--ink);}
+  .usage .pct sup{font-size:16px;color:var(--ink-3);vertical-align:top;margin-left:2px;}
+  .usage .quota{text-align:right;font-size:11px;line-height:1.6;color:var(--ink-3);font-family:-apple-system,sans-serif;}
+  .usage .quota b{color:var(--ink-2);font-weight:600;}
+  .track{display:flex;gap:2px;height:5px;margin-bottom:11px;}
+  .track i{flex:1;background:var(--border);border-radius:1px;transition:background .4s;}
+  .track i.on{background:var(--accent);}
+  .track i.tail{background:var(--accent-2);}
+  .usage .foot{display:flex;justify-content:space-between;font-size:10px;color:var(--ink-3);font-family:"JetBrains Mono",monospace;}
+  .usage .foot b{color:var(--ink-2);font-weight:500;}
+
+  .rule{height:0.5px;background:var(--border-soft);}
+
+  .cap{padding:13px 18px 6px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--ink-3);display:flex;justify-content:space-between;font-family:-apple-system,sans-serif;}
+  .cap .c{font-family:"JetBrains Mono",monospace;letter-spacing:.5px;}
+
+  .list{padding:0 8px 6px;}
+  .row{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:10px;cursor:default;transition:background .14s;}
+  .row:hover{background:var(--raise);}
+  .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;position:relative;}
+  .dot.run{background:var(--ink-3);}
+  .dot.run::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--ring-run);animation:ring 1.8s ease-out infinite;}
+  @keyframes ring{0%{transform:scale(.6);opacity:.8}100%{transform:scale(1.5);opacity:0}}
+  .dot.wait{background:var(--accent);}
+  .dot.wait::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--accent);opacity:.5;animation:ring 1.5s ease-out infinite;}
+  .dot.done{background:var(--green);}
+  .info{flex:1;min-width:0;}
+  .nm{font-size:14px;color:var(--ink);letter-spacing:-.2px;}
+  .nm .pth{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--ink-3);margin-left:7px;}
+  .st{font-size:11px;color:var(--ink-2);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:-apple-system,sans-serif;}
+  .st.attn{color:var(--accent);}
+  .tok{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--ink-3);flex-shrink:0;}
+  .spin{display:inline-block;width:9px;height:9px;border:1.5px solid var(--border);border-top-color:var(--ink-2);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px;margin-right:3px;}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .ask{margin:0 8px 4px;padding:2px 10px 6px 28px;}
+  .ask .q{font-size:11px;color:var(--ink-2);line-height:1.45;margin-bottom:7px;font-family:-apple-system,sans-serif;}
+  .ask .q code{font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--ink);background:var(--code-bg);padding:2px 6px;border-radius:5px;word-break:break-all;}
+  .opt{display:flex;align-items:center;gap:10px;padding:8px 2px;cursor:pointer;border-top:0.5px solid var(--border-soft);transition:padding-left .12s;}
+  .opt:first-of-type{border-top:none;}
+  .opt:hover{padding-left:6px;}
+  .opt .k{font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--ink-3);width:9px;flex-shrink:0;}
+  .opt .t{font-size:12px;color:var(--ink-2);flex:1;letter-spacing:-.1px;transition:color .12s;}
+  .opt:hover .t{color:var(--ink);}
+  .opt .t .sc{color:var(--ink-3);}
+  .opt.go .t{color:var(--ink);font-weight:500;}
+  .opt .tab{font-family:"JetBrains Mono",monospace;font-size:8.5px;letter-spacing:.5px;color:var(--ink-3);border:0.5px solid var(--border);border-radius:4px;padding:2px 5px;margin-left:auto;cursor:pointer;}
+  .opt .tab:hover{color:var(--ink);border-color:var(--ink-3);}
+  .reply{margin-top:6px;display:none;}
+  .reply.show{display:block;animation:rise .25s ease;}
+  .reply input{width:100%;background:var(--raise);border:0.5px solid var(--border);border-radius:8px;padding:8px 11px;font-size:11.5px;color:var(--ink);font-family:-apple-system,sans-serif;outline:none;}
+  .reply input:focus{border-color:var(--accent);}
+  .reply input::placeholder{color:var(--ink-3);}
+  .done-msg{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--green);padding:5px 0;letter-spacing:.3px;}
+
+  .foot-menu{padding:5px;}
+  .fitem{display:flex;align-items:center;gap:10px;padding:8px 13px;border-radius:9px;font-size:13.5px;color:var(--ink-2);cursor:default;transition:.12s;letter-spacing:-.1px;}
+  .fitem:hover{background:var(--raise);color:var(--ink);}
+  .fitem .ic{font-size:13px;width:14px;text-align:center;color:var(--ink-3);font-family:-apple-system,sans-serif;}
+  .fitem:hover .ic{color:var(--accent);}
+  .fitem .kbd{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--ink-3);}
+
+  .caption{margin-top:26px;font-size:13px;color:var(--ink-2);text-align:center;max-width:340px;line-height:1.7;}
+</style>
+</head>
+<body>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       THEME TOGGLE  (demo-only control — remove in production)
+       In the real app the theme should follow the macOS system appearance
+       (NSApp.effectiveAppearance / prefers-color-scheme). The toggle here
+       only flips the [data-theme] attribute on <html> for preview purposes.
+       ════════════════════════════════════════════════════════════════════ -->
+  <div class="toggle">
+    <button id="t-light" class="on" onclick="setTheme('light')">Light</button>
+    <button id="t-dark" onclick="setTheme('dark')">Dark</button>
+  </div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       FAUX MENU BAR  (demo-only — NOT part of the popover)
+       Mock of the macOS system menu bar, shown purely to give the popover
+       context. The real status item is rendered by the OS via NSStatusItem.
+         • .glyph  → the menu-bar icon (✳). Tint = accent.
+         • " 3"    → badge = number of ACTIVE (running + waiting) sessions.
+                     Hide the number entirely when count == 0.
+       ════════════════════════════════════════════════════════════════════ -->
+  <div class="menubar">
+    <span>100%</span><span>Wed 14:32</span>
+    <span class="live"><span class="glyph">✳</span> 3</span>
+  </div>
+  <!-- visual tail connecting the menu-bar icon to the popover (demo-only) -->
+  <div class="connector"></div>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       POPOVER  ← THE ACTUAL UI
+       This is what appears when the user clicks the menu-bar icon.
+       Fixed width 336px; height grows with content. Implement as an
+       NSPopover (or a borderless NSWindow) anchored under the status item.
+       Child blocks animate in with a staggered "rise" on each open.
+       ════════════════════════════════════════════════════════════════════ -->
+  <div class="pop">
+
+    <!-- ─────────────────────────────────────────────────────────────────
+         1) HEADER
+            Left  : app wordmark "Claude Dot" (static; "Dot" tinted accent).
+            Right : at-a-glance session counts.
+              • .lbl → static label "running · waiting"
+              • .n   → "{runningCount} · {waitingCount}", live values.
+                       waitingCount = sessions awaiting user approval.
+         ───────────────────────────────────────────────────────────────── -->
+    <div class="head">
+      <div class="mark"><span class="spark">✳</span><span class="word">Claude&nbsp;<span class="dot">Dot</span></span></div>
+      <div class="right">
+        <div class="lbl">running · waiting</div>
+        <div class="n">3&nbsp;·&nbsp;2</div>
+      </div>
+    </div>
+
+    <!-- ─────────────────────────────────────────────────────────────────
+         2) USAGE METER  (current-session limit — the hero element)
+            Data source: Claude Code's /status, which computes the limits
+            LOCALLY (no API call). Scraped from the TUI by a pseudo-terminal
+            probe and cached to usage.json (~10 min). The WEEKLY limit is
+            intentionally NOT shown — the meter reflects the live "now" window.
+              • .pct   → percent of the CURRENT-SESSION limit used (0–100).
+                         Drives the segmented bar below.
+              • .quota → "Current session" label + the reset time/zone.
+              • .track → 20-segment bar, built in JS from .pct (see script).
+                         Filled segs = accent; the fractional seg = accent-2.
+                         NOTE: bar is rendered at runtime, leave #track empty.
+              • .foot  → three live stats from the local transcripts:
+                         today's tokens · messages · session count.
+            Before the first probe lands, fall back to today's token total as
+            the hero. Cost is not shown (/status' total cost is the probe's own
+            throwaway session). Consider a warning hue when pct > ~90.
+         ───────────────────────────────────────────────────────────────── -->
+    <div class="usage">
+      <div class="top">
+        <div class="pct">46<sup>%</sup></div>
+        <div class="quota"><b>Current session</b><br>Resets 1:40am<br>Asia/Shanghai</div>
+      </div>
+      <div class="track" id="track"></div>
+      <div class="foot"><span>Today <b>307.7M</b></span><span>Msgs <b>1352</b></span><span>Sessions <b>3</b></span></div>
+    </div>
+
+    <div class="rule"></div>  <!-- hairline section divider -->
+
+    <!-- ─────────────────────────────────────────────────────────────────
+         3) SESSIONS LIST
+            One .row per running/recent Claude Code session. The .cap shows
+            the section title + total count.
+
+            STATUS DOT (.dot) — drives the colored indicator + animation:
+              .wait → awaiting user approval (accent, pulsing ring)
+              .run  → actively working       (grey, pulsing ring)
+              .done → finished                (green, static)
+              (add an .error variant if you surface failed sessions)
+
+            ROW FIELDS:
+              .nm        → session/project name
+              .nm .pth   → working directory (monospace, dimmed)
+              .st        → current status line. Add .attn (accent) when the
+                           session needs the user (i.e. status == waiting).
+                           For .run, prefix with <span class="spin"></span>.
+              .tok       → cumulative tokens used by this session
+
+            APPROVAL PANEL (.ask) — render DIRECTLY AFTER a row ONLY when
+            that session is in the "waiting" state. See per-panel notes below.
+         ───────────────────────────────────────────────────────────────── -->
+    <div>
+      <div class="cap"><span>Sessions</span><span class="c">4 active</span></div>
+      <div class="list">
+
+        <!-- ░░ SESSION A — state: WAITING, tool: Bash ░░
+             The approval panel (.ask) appears under a row only while waiting.
+             IMPLEMENTED: the menu-bar app can't answer the prompt remotely (it
+             is typed in the terminal), so the panel shows the pending action
+             and a single "Jump to terminal to respond" row that focuses the
+             exact tab. (Dynamic Yes / don't-ask / reply options are the design
+             target if remote response ever becomes possible — see DESIGN.md.) -->
+        <div class="row">
+          <span class="dot wait"></span>
+          <div class="info"><div class="nm">sample-api<span class="pth">~/work/sample-api</span></div><div class="st attn">Awaiting approval · Bash</div></div>
+          <span class="tok">8.2M</span>
+        </div>
+        <!-- APPROVAL PANEL
+             .q   → pending action; the <code> holds the tool's command/target
+                    (captured by the hook on PreToolUse).
+             .opt.go → the only action: jump to the terminal tab running this
+                    session so you can answer 1/2/3 there. onclick: jump(). -->
+        <div class="ask" id="p1">
+          <div class="q">Approve Bash <code>npm run build -- --dry-run</code></div>
+          <div class="opt go" onclick="jump('sample-api')"><span class="t">→ Jump to terminal to respond</span></div>
+        </div>
+
+        <!-- ░░ SESSION B — state: WAITING, tool: WebFetch ░░
+             Same pattern; the <code> pill holds the URL instead of a command. -->
+        <div class="row">
+          <span class="dot wait"></span>
+          <div class="info"><div class="nm">ai-model-matrix<span class="pth">~/dev/matrix</span></div><div class="st attn">Awaiting approval · WebFetch</div></div>
+          <span class="tok">21.7M</span>
+        </div>
+        <div class="ask" id="p2">
+          <div class="q">Approve WebFetch <code>api.example.com/v1/…</code></div>
+          <div class="opt go" onclick="jump('ai-model-matrix')"><span class="t">→ Jump to terminal to respond</span></div>
+        </div>
+
+        <!-- ░░ SESSION C — state: RUNNING ░░
+             No approval panel. .st shows the live activity with a spinner;
+             update the text from the session's current tool/progress. -->
+        <div class="row">
+          <span class="dot run"></span>
+          <div class="info"><div class="nm">dashboard-app<span class="pth">~/work/dashboard</span></div><div class="st"><span class="spin"></span>Running tests 14/38</div></div>
+          <span class="tok">15.9M</span>
+        </div>
+
+        <!-- ░░ SESSION D — state: DONE ░░
+             Terminal state; .st shows completion + relative time. -->
+        <div class="row">
+          <span class="dot done"></span>
+          <div class="info"><div class="nm">benchmark-lab<span class="pth">~/work/bench</span></div><div class="st">Completed · 2 min ago</div></div>
+          <span class="tok">22.4M</span>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="rule"></div>  <!-- hairline section divider -->
+
+    <!-- ─────────────────────────────────────────────────────────────────
+         4) FOOTER MENU  (global actions)
+            Standard menu items with optional keyboard shortcut hints (.kbd):
+              • New session   ⌘N  → spawn a new Claude Code session
+              • View all logs     → open full log/history window
+              • Preferences   ⌘,  → open settings
+              • Quit          ⌘Q  → quit the menu-bar app
+         ───────────────────────────────────────────────────────────────── -->
+    <div class="foot-menu">
+      <div class="fitem"><span class="ic">✳</span>New session<span class="kbd">⌘N</span></div>
+      <div class="fitem"><span class="ic">⊟</span>View all logs</div>
+      <div class="fitem"><span class="ic">⚙</span>Preferences<span class="kbd">⌘,</span></div>
+      <div class="fitem"><span class="ic">⏻</span>Quit<span class="kbd">⌘Q</span></div>
+    </div>
+
+  </div>
+  <!-- /POPOVER -->
+
+  <!-- demo-only descriptive caption, not part of the popover -->
+  <p class="caption">One click — usage, status, and approvals at a glance</p>
+
+<script>
+  /* ══════════════════════════════════════════════════════════════════════
+     SCRIPT — In this static mockup these handlers fake the responses so the
+     UI can be clicked through. In production, replace the bodies with calls
+     to the Claude Code session backend (the DOM/animation is reusable).
+     ══════════════════════════════════════════════════════════════════════ */
+
+  /* USAGE BAR builder — renders the 20-segment meter from the percentage.
+     KEEP THIS: it is the real rendering logic, just feed it the live pct.
+       full    = number of fully-filled segments (floor)
+       partial = whether to draw one fractional (faded) segment
+     Feed it the live CURRENT-SESSION % from /status (usage.json). */
+  (function buildTrack(){
+    const pct = 46, segs = 20;             // ← live current-session limit %
+    const filled = pct/100*segs;
+    const full = Math.floor(filled);
+    const partial = filled - full > 0;     // true -> 1 fade segment
+    const t = document.getElementById('track');
+    for(let i=0;i<segs;i++){
+      const s = document.createElement('i');
+      if(i < full) s.className = 'on';
+      else if(i === full && partial) s.className = 'on tail';
+      t.appendChild(s);
+    }
+  })();
+
+  /* THEME — demo-only. Production should bind to the OS appearance instead
+     of these buttons (see theme-toggle comment in <body>). */
+  function setTheme(m){
+    document.documentElement.setAttribute('data-theme', m);
+    document.getElementById('t-light').classList.toggle('on', m==='light');
+    document.getElementById('t-dark').classList.toggle('on', m==='dark');
+  }
+
+  /* JUMP TO RESPOND — the approval panel's only action. The app can't answer a
+     permission prompt remotely (it's typed in the terminal), so this focuses
+     the exact terminal tab/window running that session.
+     PRODUCTION: resolve the session's pid → tty and select its Terminal/iTerm
+     tab (or activate the host app); see jump(pid:cwd:) in main.swift. */
+  function jump(name){ console.log('jump to session:', name); }
+</script>
+</body>
+</html>

@@ -219,30 +219,49 @@ struct DesktopSession {
     }
 }
 
-// True when the last role-bearing message in a transcript tail is an assistant
-// turn ending on a tool_use with no following user/tool_result — i.e. the
-// session is blocked awaiting approval or a running tool. This is the only live
-// signal the transcript adds beyond file freshness.
-func transcriptEndsWithPendingTool(_ lines: [[String: Any]]) -> Bool {
+// Tools whose pending tool_use means the session is BLOCKED ON THE USER (the
+// agent asked a question / is waiting for plan approval) rather than executing.
+// These stay "waiting" no matter how long the transcript has been quiet — that
+// quiet IS the session waiting for you. See inferDesktopStatus.
+let userBlockingTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
+
+// Name of the tool the transcript tail ends on with no following user/tool_result
+// — i.e. the session is blocked awaiting approval, a running tool, or (for the
+// user-blocking tools above) the user's answer. nil when the last role-bearing
+// message is a user turn or carries no tool_use. This is the only live signal
+// the transcript adds beyond file freshness.
+func transcriptPendingTool(_ lines: [[String: Any]]) -> String? {
     for line in lines.reversed() {
         guard let msg = line["message"] as? [String: Any],
               let role = msg["role"] as? String else { continue }
-        if role == "user" { return false }   // a user turn (incl. tool_result) answered it
+        if role == "user" { return nil }   // a user turn (incl. tool_result) answered it
         if role == "assistant" {
             let content = msg["content"] as? [[String: Any]] ?? []
-            return content.contains { ($0["type"] as? String) == "tool_use" }
+            // Prefer a user-blocking tool name if present, else the first tool_use.
+            let toolNames = content.compactMap { item -> String? in
+                (item["type"] as? String) == "tool_use" ? (item["name"] as? String ?? "") : nil
+            }
+            if let blocking = toolNames.first(where: { userBlockingTools.contains($0) }) { return blocking }
+            return toolNames.first
         }
     }
-    return false
+    return nil
 }
 
-// Infer a Desktop session's status from its transcript: a fresh file ending on
-// a pending tool_use is awaiting input; otherwise a fresh file is running; a
-// quiet one is idle. Reuses runningLivenessWindow as the "fresh" threshold.
-func inferDesktopStatus(pendingTool: Bool, mtime: Double,
+// Infer a Desktop session's status from its transcript:
+//   • Ends on a user-blocking tool (AskUserQuestion / ExitPlanMode) → waiting,
+//     REGARDLESS of how long it has been quiet — the agent is blocked on your
+//     answer, and that wait is exactly when the transcript goes silent. Letting
+//     it decay to idle (the old bug) made "needs input" sessions vanish.
+//   • Fresh + some other pending tool_use → waiting (approval / running tool).
+//   • Fresh + no pending tool → running.
+//   • Quiet + no user-blocking prompt → idle.
+// pendingTool is the tool name the transcript ends on (nil if none / answered).
+func inferDesktopStatus(pendingTool: String?, mtime: Double,
                         now: Double = Date().timeIntervalSince1970) -> Status {
+    if let t = pendingTool, userBlockingTools.contains(t) { return .waiting }
     if now - mtime >= runningLivenessWindow { return .idle }
-    return pendingTool ? .waiting : .running
+    return pendingTool != nil ? .waiting : .running
 }
 
 // Merge the authoritative native sessions with our hook-derived enrichment.
@@ -306,7 +325,11 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
     // and skip any id already surfaced by native/hook discovery.
     var seen = Set(out.map { $0.id })
     for d in desktop where !seen.contains(d.sessionId) {
-        if now - d.updatedAt < 120 && d.status != .idle {
+        // .waiting = blocked on the user (a question / plan approval) — keep it
+        // visible no matter how long it's been quiet; that's the whole point of a
+        // "needs input" flag. .running only counts while the transcript is fresh.
+        let include = d.status == .waiting || (now - d.updatedAt < 120 && d.status == .running)
+        if include {
             out.append(Session(id: d.sessionId, folder: d.folder, cwd: d.cwd,
                                status: d.status, title: d.title,
                                lastEvent: d.activityText, updatedAt: d.updatedAt,

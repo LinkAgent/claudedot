@@ -174,16 +174,24 @@ let toolUseLines: [[String: Any]] = [
 let answeredLines: [[String: Any]] = toolUseLines + [
     ["message": ["role": "user", "content": [["type": "tool_result"]]]],
 ]
-check("tail detects pending tool_use", transcriptEndsWithPendingTool(toolUseLines))
-check("tail clears after tool_result", !transcriptEndsWithPendingTool(answeredLines))
-check("tail empty -> no pending", !transcriptEndsWithPendingTool([]))
+let askLines: [[String: Any]] = [
+    ["message": ["role": "assistant", "content": [["type": "tool_use", "name": "AskUserQuestion"]]]],
+]
+check("tail detects pending tool name", transcriptPendingTool(toolUseLines) == "Bash")
+check("tail clears after tool_result", transcriptPendingTool(answeredLines) == nil)
+check("tail empty -> no pending", transcriptPendingTool([]) == nil)
+check("tail surfaces user-blocking tool", transcriptPendingTool(askLines) == "AskUserQuestion")
 
 check("fresh + pending -> waiting",
-      inferDesktopStatus(pendingTool: true, mtime: now - 5, now: now) == .waiting)
+      inferDesktopStatus(pendingTool: "Bash", mtime: now - 5, now: now) == .waiting)
 check("fresh + no pending -> running",
-      inferDesktopStatus(pendingTool: false, mtime: now - 5, now: now) == .running)
-check("stale -> idle",
-      inferDesktopStatus(pendingTool: true, mtime: now - 200, now: now) == .idle)
+      inferDesktopStatus(pendingTool: nil, mtime: now - 5, now: now) == .running)
+check("stale generic pending -> idle",
+      inferDesktopStatus(pendingTool: "Bash", mtime: now - 200, now: now) == .idle)
+check("stale AskUserQuestion -> still waiting (blocked on user)",
+      inferDesktopStatus(pendingTool: "AskUserQuestion", mtime: now - 99999, now: now) == .waiting)
+check("stale ExitPlanMode -> still waiting",
+      inferDesktopStatus(pendingTool: "ExitPlanMode", mtime: now - 99999, now: now) == .waiting)
 
 // --- mergeSessions with desktop ---
 func dsess(_ id: String, _ st: Status, age: Double = 1) -> DesktopSession {
@@ -194,7 +202,11 @@ check("desktop running session included", md1.count == 1 && md1.first?.id == "d1
 let md2 = mergeSessions(native: [], hooks: [:], desktop: [dsess("d1", .idle)], now: now)
 check("desktop idle dropped", md2.count == 0)
 let md3 = mergeSessions(native: [], hooks: [:], desktop: [dsess("d1", .running, age: 999)], now: now)
-check("desktop stale dropped", md3.count == 0)
+check("desktop stale running dropped", md3.count == 0)
+// A waiting (needs-input) desktop session stays visible no matter how long it
+// has been quiet — that quiet is the session waiting for the user.
+let md3w = mergeSessions(native: [], hooks: [:], desktop: [dsess("d1", .waiting, age: 99999)], now: now)
+check("desktop stale waiting kept", md3w.count == 1 && md3w.first?.status == .waiting)
 let md4 = mergeSessions(native: [nsess("dup", "busy")], hooks: [:],
                         desktop: [dsess("dup", .waiting)], now: now)
 check("desktop de-duped against native", md4.count == 1 && md4.first?.status == .running)

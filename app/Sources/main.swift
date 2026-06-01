@@ -663,6 +663,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Claude Desktop's own session registry (Cowork / agent mode). Private to the
     // desktop app and version-fragile — schema may change across Claude releases.
     let desktopDir = NSString(string: "~/Library/Application Support/Claude/claude-code-sessions").expandingTildeInPath
+    // A desktop session blocked on you (a question / plan approval) goes quiet, so
+    // its transcript mtime ages well past the 90s "running" window. Read the tail
+    // within this wider window so those still surface as "waiting"; beyond it,
+    // skip the read entirely. Bounded because non-archived recent sessions are few.
+    let desktopReadWindow: Double = 6 * 3600
     // /status scraper (subscription limits) — script, output cache, scratch dir.
     let probeScript = NSString(string: "~/.claude/statusbar/cc_usage_probe.py").expandingTildeInPath
     let usagePath = NSString(string: "~/.claude/statusbar/usage.json").expandingTildeInPath
@@ -780,8 +785,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     // Scan Claude Desktop's session registry (two levels: account/workspace).
-    // Cheap freshness gate on lastActivityAt runs BEFORE any transcript I/O;
-    // surviving sessions get a status inferred from their transcript tail.
+    // A cheap transcript-mtime gate runs before the tail read; surviving sessions
+    // get a status inferred from their transcript tail, and only non-idle ones are
+    // kept (idle = nothing to show; merge would drop them anyway).
     func loadDesktop() -> [DesktopSession] {
         let fm = FileManager.default
         let now = Date().timeIntervalSince1970
@@ -801,15 +807,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     // Activity is judged by the TRANSCRIPT mtime, not the file's
                     // lastActivityAt — the latter lags by minutes (it tracks UI
                     // focus, not work), which would drop live sessions and show a
-                    // stale age. Stat is cheap; only read the tail when fresh.
+                    // stale age. Stat is cheap; only read the tail within the window.
                     guard let tpath = findTranscript(d.sessionId) else { continue }
                     let mtime = ((try? fm.attributesOfItem(atPath: tpath))?[.modificationDate] as? Date)?
                         .timeIntervalSince1970 ?? 0
-                    if now - mtime >= runningLivenessWindow { continue } // not active — skip the tail read
+                    if now - mtime >= desktopReadWindow { continue } // long inactive — skip the tail read
                     let tail = transcriptTail(d.sessionId)
                     d.updatedAt = mtime
                     d.status = inferDesktopStatus(pendingTool: tail.pendingTool, mtime: mtime, now: now)
-                    result.append(d)
+                    if d.status != .idle { result.append(d) } // idle = nothing to surface
                 }
             }
         }
@@ -821,20 +827,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     // Read the tail of a session's transcript (last ~16KB only, so huge files
-    // stay cheap): returns whether it ends on an unanswered tool_use and the
-    // file's mtime — the two inputs to inferDesktopStatus.
-    func transcriptTail(_ id: String) -> (pendingTool: Bool, mtime: Double) {
-        guard let path = findTranscript(id) else { return (false, 0) }
+    // stay cheap): returns the tool name it ends on with no answer (nil if none)
+    // and the file's mtime — the two inputs to inferDesktopStatus.
+    func transcriptTail(_ id: String) -> (pendingTool: String?, mtime: Double) {
+        guard let path = findTranscript(id) else { return (nil, 0) }
         let fm = FileManager.default
         let mtime = ((try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date)?
             .timeIntervalSince1970 ?? 0
-        guard let handle = FileHandle(forReadingAtPath: path) else { return (false, mtime) }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, mtime) }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
         let window: UInt64 = 16 * 1024
         let start = size > window ? size - window : 0
         try? handle.seek(toOffset: start)
-        guard let data = try? handle.readToEnd(), !data.isEmpty else { return (false, mtime) }
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return (nil, mtime) }
         // If we seeked into the middle, drop the leading partial line.
         var slice = data
         if start > 0, let firstNL = data.firstIndex(of: 0x0A) {
@@ -844,7 +850,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         for raw in slice.split(separator: 0x0A) {
             if let obj = try? JSONSerialization.jsonObject(with: Data(raw)) as? [String: Any] { lines.append(obj) }
         }
-        return (transcriptEndsWithPendingTool(lines), mtime)
+        return (transcriptPendingTool(lines), mtime)
     }
 
     // Locate a session's transcript .jsonl under ~/.claude/projects/*/.

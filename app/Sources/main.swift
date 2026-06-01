@@ -347,7 +347,7 @@ final class HoverRow: NSView {
 // MARK: - Popover builder
 
 struct PopoverHandlers {
-    var jump: (Int32?, String) -> Void = { _, _ in }
+    var jump: (Int32?, String, Bool) -> Void = { _, _, _ in }
     var newSession: () -> Void = {}
     var viewLogs: () -> Void = {}
     var preferences: () -> Void = {}
@@ -498,7 +498,7 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
     for vm in sessions {
         let s = vm.s
         let row = HoverRow(theme: theme)
-        row.onClick = { handlers.jump(s.pid, s.cwd) }
+        row.onClick = { handlers.jump(s.pid, s.cwd, s.isDesktop) }
 
         let dot = DotView(status: s.status, theme: theme)
 
@@ -555,8 +555,9 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
             panel.addArrangedSubview(qLabel)
 
             let jumpRow = HoverRow(theme: theme)
-            jumpRow.onClick = { handlers.jump(s.pid, s.cwd) }
-            let jumpLabel = label("→  Jump to terminal to respond", ui(12, .medium), theme.ink)
+            jumpRow.onClick = { handlers.jump(s.pid, s.cwd, s.isDesktop) }
+            let jumpLabel = label(s.isDesktop ? "→  Jump to Claude to respond" : "→  Jump to terminal to respond",
+                                  ui(12, .medium), theme.ink)
             jumpRow.addSubview(jumpLabel)
             NSLayoutConstraint.activate([
                 jumpLabel.topAnchor.constraint(equalTo: jumpRow.topAnchor, constant: 6),
@@ -659,6 +660,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let nativeDir = NSString(string: "~/.claude/sessions").expandingTildeInPath
     let hookDir = NSString(string: "~/.claude/statusbar/sessions").expandingTildeInPath
     let projectsDir = NSString(string: "~/.claude/projects").expandingTildeInPath
+    // Claude Desktop's own session registry (Cowork / agent mode). Private to the
+    // desktop app and version-fragile — schema may change across Claude releases.
+    let desktopDir = NSString(string: "~/Library/Application Support/Claude/claude-code-sessions").expandingTildeInPath
     // /status scraper (subscription limits) — script, output cache, scratch dir.
     let probeScript = NSString(string: "~/.claude/statusbar/cc_usage_probe.py").expandingTildeInPath
     let usagePath = NSString(string: "~/.claude/statusbar/usage.json").expandingTildeInPath
@@ -672,6 +676,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var cachedStats = UsageStats()
     let menuBarIconSize: CGFloat = 18
     var timer: Timer?
+    // Observes the menu-bar appearance so the glyph + an open popover follow a
+    // live macOS Light/Dark switch immediately (DESIGN.md §13: follow system
+    // appearance). Without this the icon only catches up on the next 1.5s tick
+    // and an already-open popover keeps its stale theme until reopened.
+    var appearanceObserver: NSKeyValueObservation?
+    // KVO on effectiveAppearance fires once per view-layer during a switch (dozens
+    // of times); this coalesces the burst into a single re-skin.
+    var appearanceWork: DispatchWorkItem?
     let popover = NSPopover()
     // Stable content view — we swap its CHILDREN on re-render, never the view
     // object itself, so updating a shown transient popover doesn't dismiss it.
@@ -701,6 +713,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         refresh()
         refreshPopoverData(loadSessions()) // warm the cache so the first click is instant
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refresh() }
+        // Follow live system Light/Dark switches. Observe the APP's
+        // effectiveAppearance (it tracks the system setting), not the status
+        // button's (which tracks the menu bar and can be dark in Light mode).
+        // KVO fires once AppKit has resolved the new appearance, so reading it
+        // back in the handler is safe.
+        appearanceObserver = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            guard let self = self else { return }
+            self.appearanceWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.appearanceDidChange() }
+            self.appearanceWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+        }
+    }
+
+    // Re-skin for the current system appearance: re-render the menu-bar glyph and
+    // rebuild an open popover in the new theme (the data signature is unchanged
+    // by a theme switch, so refresh() alone won't rebuild it). Uses cached data —
+    // no disk I/O — since the sessions haven't changed, only the colors.
+    func appearanceDidChange() {
+        let agg = aggregateStatus(cachedVMs.map { $0.s })
+        statusItem.button?.image = statusIcon(for: agg, diameter: menuBarIconSize,
+                                              appearance: statusItem.button?.effectiveAppearance)
+        if popover.isShown { renderPopover(vms: cachedVMs, stats: cachedStats) }
     }
 
     func anotherInstanceRunning() -> Bool {
@@ -744,7 +779,73 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return map
     }
 
-    func loadSessions() -> [Session] { mergeSessions(native: loadNative(), hooks: loadHookStates()) }
+    // Scan Claude Desktop's session registry (two levels: account/workspace).
+    // Cheap freshness gate on lastActivityAt runs BEFORE any transcript I/O;
+    // surviving sessions get a status inferred from their transcript tail.
+    func loadDesktop() -> [DesktopSession] {
+        let fm = FileManager.default
+        let now = Date().timeIntervalSince1970
+        var result: [DesktopSession] = []
+        guard let accounts = try? fm.contentsOfDirectory(atPath: desktopDir) else { return [] }
+        for acct in accounts {
+            let acctPath = (desktopDir as NSString).appendingPathComponent(acct)
+            guard let workspaces = try? fm.contentsOfDirectory(atPath: acctPath) else { continue }
+            for ws in workspaces {
+                let wsPath = (acctPath as NSString).appendingPathComponent(ws)
+                guard let files = try? fm.contentsOfDirectory(atPath: wsPath) else { continue }
+                for file in files where file.hasPrefix("local_") && file.hasSuffix(".json") {
+                    let path = (wsPath as NSString).appendingPathComponent(file)
+                    guard let data = fm.contents(atPath: path),
+                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          var d = DesktopSession(json: obj) else { continue }
+                    // Activity is judged by the TRANSCRIPT mtime, not the file's
+                    // lastActivityAt — the latter lags by minutes (it tracks UI
+                    // focus, not work), which would drop live sessions and show a
+                    // stale age. Stat is cheap; only read the tail when fresh.
+                    guard let tpath = findTranscript(d.sessionId) else { continue }
+                    let mtime = ((try? fm.attributesOfItem(atPath: tpath))?[.modificationDate] as? Date)?
+                        .timeIntervalSince1970 ?? 0
+                    if now - mtime >= runningLivenessWindow { continue } // not active — skip the tail read
+                    let tail = transcriptTail(d.sessionId)
+                    d.updatedAt = mtime
+                    d.status = inferDesktopStatus(pendingTool: tail.pendingTool, mtime: mtime, now: now)
+                    result.append(d)
+                }
+            }
+        }
+        return result
+    }
+
+    func loadSessions() -> [Session] {
+        mergeSessions(native: loadNative(), hooks: loadHookStates(), desktop: loadDesktop())
+    }
+
+    // Read the tail of a session's transcript (last ~16KB only, so huge files
+    // stay cheap): returns whether it ends on an unanswered tool_use and the
+    // file's mtime — the two inputs to inferDesktopStatus.
+    func transcriptTail(_ id: String) -> (pendingTool: Bool, mtime: Double) {
+        guard let path = findTranscript(id) else { return (false, 0) }
+        let fm = FileManager.default
+        let mtime = ((try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date)?
+            .timeIntervalSince1970 ?? 0
+        guard let handle = FileHandle(forReadingAtPath: path) else { return (false, mtime) }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let window: UInt64 = 16 * 1024
+        let start = size > window ? size - window : 0
+        try? handle.seek(toOffset: start)
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return (false, mtime) }
+        // If we seeked into the middle, drop the leading partial line.
+        var slice = data
+        if start > 0, let firstNL = data.firstIndex(of: 0x0A) {
+            slice = data.subdata(in: (firstNL + 1)..<data.endIndex)
+        }
+        var lines: [[String: Any]] = []
+        for raw in slice.split(separator: 0x0A) {
+            if let obj = try? JSONSerialization.jsonObject(with: Data(raw)) as? [String: Any] { lines.append(obj) }
+        }
+        return (transcriptEndsWithPendingTool(lines), mtime)
+    }
 
     // Locate a session's transcript .jsonl under ~/.claude/projects/*/.
     func findTranscript(_ id: String) -> String? {
@@ -916,8 +1017,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Build the popover's view tree from already-computed data. Main thread only
     // (AppKit), but cheap — no file parsing happens here.
     func renderPopover(vms: [SessionVM], stats: UsageStats) {
-        let appearance = statusItem.button?.effectiveAppearance ?? NSApp.effectiveAppearance
-        let theme = Theme.current(appearance)
+        // Use the APP appearance (follows the system Light/Dark setting), NOT the
+        // status button's — the menu bar's appearance is often dark even in Light
+        // mode (e.g. a dark wallpaper darkens the menu bar), which would pin the
+        // popover to the dark theme forever. The glyph still uses the button
+        // appearance so it contrasts the menu bar.
+        let theme = Theme.current(NSApp.effectiveAppearance)
         let view = buildPopover(sessions: vms, stats: stats, theme: theme, handlers: handlers())
         // Replace only the host's children — keep the host (vc.view) identity so a
         // shown transient popover is not dismissed when content updates.
@@ -960,7 +1065,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func handlers() -> PopoverHandlers {
         var h = PopoverHandlers()
-        h.jump = { [weak self] pid, cwd in self?.popover.performClose(nil); self?.jump(pid: pid, cwd: cwd) }
+        h.jump = { [weak self] pid, cwd, isDesktop in self?.popover.performClose(nil); self?.jump(pid: pid, cwd: cwd, isDesktop: isDesktop) }
         h.newSession = { [weak self] in self?.popover.performClose(nil); self?.newSession() }
         h.viewLogs = { [weak self] in self?.popover.performClose(nil)
             NSWorkspace.shared.open(URL(fileURLWithPath: self?.projectsDir ?? "")) }
@@ -977,12 +1082,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     // MARK: jump-to-session (reused by rows + approval panels)
 
-    func jump(pid: Int32?, cwd: String) {
+    func jump(pid: Int32?, cwd: String, isDesktop: Bool = false) {
+        // Desktop (Cowork / agent-mode) sessions can't be focused by tty and
+        // can't be navigated to a specific conversation safely (the only
+        // per-session deep link, claude://resume?session=, *imports* the CLI
+        // session and forks a duplicate). The best we can safely do is bring the
+        // desktop app forward. Its native pid (if any) just points back at
+        // Claude.app, so skip the terminal probe entirely.
+        if isDesktop {
+            if activateClaudeDesktop() { return }
+            if !cwd.isEmpty { openTerminalAt(cwd) }
+            return
+        }
         if let pid = pid, pid > 0 {
             if focusTerminalForPid(pid) { return }
             if let app = hostAppForPid(pid) { app.activate(options: [.activateIgnoringOtherApps]); return }
         }
         if !cwd.isEmpty { openTerminalAt(cwd) }
+    }
+
+    // Activate the Claude desktop app if it's running (regular GUI app whose
+    // bundle id mentions "claude"; our own menu-bar app is .accessory, so it's
+    // never matched here).
+    func activateClaudeDesktop() -> Bool {
+        let app = NSWorkspace.shared.runningApplications.first {
+            $0.activationPolicy == .regular &&
+            ($0.bundleIdentifier?.lowercased().contains("claude") ?? false)
+        }
+        app?.activate(options: [.activateIgnoringOtherApps])
+        return app != nil
     }
 
     func ttyForPid(_ pid: Int32) -> String? {
@@ -1095,12 +1223,14 @@ func demoData() -> ([SessionVM], UsageStats) {
                 pendingTool: "WebFetch", pendingInput: "api.example.com/v1/status"),
         Session(id: "c", folder: "dashboard-app", cwd: "/Users/demo/work/dashboard", status: .running,
                 lastEvent: "Running tests 14/38", updatedAt: now - 5, pid: 3),
+        Session(id: "f", folder: "creator-dash", cwd: "/Users/demo/work/creator-dash", status: .running,
+                lastEvent: "Desktop", updatedAt: now - 8, isDesktop: true),
         Session(id: "e", folder: "release-tools", cwd: "/Users/demo/work/release", status: .error,
                 lastEvent: "error in Bash", lastError: "psql: connection refused", updatedAt: now - 60, pid: 5),
         Session(id: "d", folder: "benchmark-lab", cwd: "/Users/demo/work/bench", status: .idle,
                 lastEvent: "Completed", updatedAt: now - 130, pid: 4),
     ]
-    let toks = ["a": 8_200_000, "b": 21_700_000, "c": 15_900_000, "e": 3_100_000, "d": 22_400_000]
+    let toks = ["a": 8_200_000, "b": 21_700_000, "c": 15_900_000, "e": 3_100_000, "d": 22_400_000, "f": 6_500_000]
     let vms = sessions.map { SessionVM(s: $0, tokens: toks[$0.id] ?? 0) }
     var st = UsageStats()
     st.todayTokens = 12_400_000

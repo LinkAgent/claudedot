@@ -1002,8 +1002,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    // Identity of the visible popover content. Deliberately ORDER-INDEPENDENT
+    // (sorted) and free of volatile fields like updatedAt: an active session's
+    // transcript mtime ticks every poll and reorders the list, which would
+    // otherwise rebuild the popover each tick and flicker it. Only a real change
+    // (a session added/removed, a status change, a new pending input) rebuilds.
     func signature(_ sessions: [Session]) -> String {
-        sessions.map { "\($0.id):\($0.status.rawValue):\($0.pendingInput ?? "")" }.joined(separator: "|")
+        sessions.map { "\($0.id):\($0.status.rawValue):\($0.pendingInput ?? "")" }.sorted().joined(separator: "|")
     }
 
     // Parse transcripts + scrape usage off the main thread, then render on main.

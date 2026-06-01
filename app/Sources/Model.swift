@@ -253,15 +253,17 @@ func transcriptPendingTool(_ lines: [[String: Any]]) -> String? {
 //     REGARDLESS of how long it has been quiet — the agent is blocked on your
 //     answer, and that wait is exactly when the transcript goes silent. Letting
 //     it decay to idle (the old bug) made "needs input" sessions vanish.
-//   • Fresh + some other pending tool_use → waiting (approval / running tool).
-//   • Fresh + no pending tool → running.
-//   • Quiet + no user-blocking prompt → idle.
+//   • Otherwise freshness alone decides: a recently-written transcript is the
+//     agent working, a quiet one is idle.
+// A pending NON-blocking tool_use (Bash/Edit/…) is a tool EXECUTING, not awaiting
+// you — so it stays "running", not "waiting". (Classifying a mid-execution tool as
+// waiting made an actively-working session flip waiting↔running every poll, which
+// added/removed the approval panel and flickered the popover up and down.)
 // pendingTool is the tool name the transcript ends on (nil if none / answered).
 func inferDesktopStatus(pendingTool: String?, mtime: Double,
                         now: Double = Date().timeIntervalSince1970) -> Status {
     if let t = pendingTool, userBlockingTools.contains(t) { return .waiting }
-    if now - mtime >= runningLivenessWindow { return .idle }
-    return pendingTool != nil ? .waiting : .running
+    return (now - mtime >= runningLivenessWindow) ? .idle : .running
 }
 
 // Merge the authoritative native sessions with our hook-derived enrichment.

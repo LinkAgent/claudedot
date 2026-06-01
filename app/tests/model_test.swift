@@ -182,8 +182,8 @@ check("tail clears after tool_result", transcriptPendingTool(answeredLines) == n
 check("tail empty -> no pending", transcriptPendingTool([]) == nil)
 check("tail surfaces user-blocking tool", transcriptPendingTool(askLines) == "AskUserQuestion")
 
-check("fresh + pending -> waiting",
-      inferDesktopStatus(pendingTool: "Bash", mtime: now - 5, now: now) == .waiting)
+check("fresh + executing tool -> running (not waiting)",
+      inferDesktopStatus(pendingTool: "Bash", mtime: now - 5, now: now) == .running)
 check("fresh + no pending -> running",
       inferDesktopStatus(pendingTool: nil, mtime: now - 5, now: now) == .running)
 check("stale generic pending -> idle",

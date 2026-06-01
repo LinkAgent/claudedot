@@ -152,6 +152,70 @@ let mp = mergeSessions(native: [nsess("a", "waiting")],
                                             pendingInput: "npm run build")], now: now)
 check("merge carries pending", mp.first?.pendingInput == "npm run build")
 
+// --- DesktopSession parsing ---
+let d0 = DesktopSession(json: [
+    "cliSessionId": "cs1", "cwd": "/Users/me/proj", "title": "dev - x",
+    "lastActivityAt": now * 1000.0, "prNumber": 42, "prState": "OPEN", "isArchived": false
+])
+check("desktop parses", d0 != nil)
+check("desktop id is cliSessionId", d0?.sessionId == "cs1")
+check("desktop folder from cwd", d0?.folder == "proj")
+check("desktop ms->seconds", d0?.updatedAt == now)
+check("desktop pr parsed", d0?.prNumber == 42)
+check("desktop activity shows PR", (d0?.activityText ?? "").contains("PR #42"))
+check("desktop rejects archived", DesktopSession(json: ["cliSessionId": "x", "isArchived": true]) == nil)
+check("desktop rejects no cliSessionId", DesktopSession(json: ["cwd": "/a"]) == nil)
+
+// --- transcript tail / status inference ---
+let toolUseLines: [[String: Any]] = [
+    ["message": ["role": "user", "content": [["type": "text", "text": "hi"]]]],
+    ["message": ["role": "assistant", "content": [["type": "tool_use", "name": "Bash"]]]],
+]
+let answeredLines: [[String: Any]] = toolUseLines + [
+    ["message": ["role": "user", "content": [["type": "tool_result"]]]],
+]
+check("tail detects pending tool_use", transcriptEndsWithPendingTool(toolUseLines))
+check("tail clears after tool_result", !transcriptEndsWithPendingTool(answeredLines))
+check("tail empty -> no pending", !transcriptEndsWithPendingTool([]))
+
+check("fresh + pending -> waiting",
+      inferDesktopStatus(pendingTool: true, mtime: now - 5, now: now) == .waiting)
+check("fresh + no pending -> running",
+      inferDesktopStatus(pendingTool: false, mtime: now - 5, now: now) == .running)
+check("stale -> idle",
+      inferDesktopStatus(pendingTool: true, mtime: now - 200, now: now) == .idle)
+
+// --- mergeSessions with desktop ---
+func dsess(_ id: String, _ st: Status, age: Double = 1) -> DesktopSession {
+    DesktopSession(sessionId: id, cwd: "/a/\(id)", title: "t", status: st, updatedAt: now - age)
+}
+let md1 = mergeSessions(native: [], hooks: [:], desktop: [dsess("d1", .running)], now: now)
+check("desktop running session included", md1.count == 1 && md1.first?.id == "d1")
+let md2 = mergeSessions(native: [], hooks: [:], desktop: [dsess("d1", .idle)], now: now)
+check("desktop idle dropped", md2.count == 0)
+let md3 = mergeSessions(native: [], hooks: [:], desktop: [dsess("d1", .running, age: 999)], now: now)
+check("desktop stale dropped", md3.count == 0)
+let md4 = mergeSessions(native: [nsess("dup", "busy")], hooks: [:],
+                        desktop: [dsess("dup", .waiting)], now: now)
+check("desktop de-duped against native", md4.count == 1 && md4.first?.status == .running)
+
+// A native row marks itself as a desktop session via entrypoint; merge must not
+// surface it as a native (idle, zero-age) row — the transcript-driven desktop
+// pass owns it, and the native pid is carried onto that row for jump/liveness.
+func ndesk(_ id: String, age: Double = 1) -> NativeSession {
+    NativeSession(pid: 777, sessionId: id, cwd: "/a/\(id)", nativeStatus: "idle",
+                  entrypoint: "claude-desktop", updatedAt: now - age)
+}
+let md5 = mergeSessions(native: [ndesk("dk")], hooks: [:], desktop: [], now: now)
+check("native claude-desktop entry not surfaced as idle row", md5.isEmpty)
+let md6 = mergeSessions(native: [ndesk("dk")], hooks: [:], desktop: [dsess("dk", .running)], now: now)
+check("desktop session carries native pid", md6.count == 1 && md6.first?.pid == 777)
+check("desktop session flagged isDesktop", md6.first?.isDesktop == true)
+check("desktop status from transcript, not native idle", md6.first?.status == .running)
+// A genuine CLI session is unaffected and is NOT flagged desktop.
+let md7 = mergeSessions(native: [nsess("cli1", "busy")], hooks: [:], now: now)
+check("cli session not flagged desktop", md7.first?.isDesktop == false)
+
 print("")
 if failures > 0 { print("FAILED: \(failures)"); exit(1) }
 print("ALL PASSED")

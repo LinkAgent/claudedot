@@ -82,7 +82,9 @@ def capture():
 
 def _cleanup_sessions(pid):
     """Remove the session file our SIGKILL'd claude left behind (named <pid>.json),
-    plus any older leftovers whose cwd is our scratch dir."""
+    plus any older leftovers whose cwd is our scratch dir. Also sweeps the
+    statusbar hook-state dir for files our own hook wrote on the probe's behalf
+    (cwd==PROBE_DIR) — otherwise they pile up forever, one per probe run."""
     import json as _json
     sdir = os.path.expanduser("~/.claude/sessions")
     for name in ([f"{pid}.json"] + (os.listdir(sdir) if os.path.isdir(sdir) else [])):
@@ -94,6 +96,17 @@ def _cleanup_sessions(pid):
                 os.remove(p)
         except OSError:
             pass
+    hdir = os.path.expanduser("~/.claude/statusbar/sessions")
+    if os.path.isdir(hdir):
+        for name in os.listdir(hdir):
+            if not name.endswith(".json"):
+                continue
+            p = os.path.join(hdir, name)
+            try:
+                if _json.load(open(p)).get("cwd") == PROBE_DIR:
+                    os.remove(p)
+            except (OSError, ValueError):
+                pass
 
 
 def parse(raw):

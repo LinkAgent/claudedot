@@ -228,6 +228,26 @@ check("desktop status from transcript, not native idle", md6.first?.status == .r
 let md7 = mergeSessions(native: [nsess("cli1", "busy")], hooks: [:], now: now)
 check("cli session not flagged desktop", md7.first?.isDesktop == false)
 
+// Desktop native + hook: hook drives status, native pid is carried, isDesktop=true.
+// This is the path used by Claude Desktop Cowork sessions that DO run user hooks
+// (their native entry has no busy/waiting, so the hook is the only live signal).
+let md8 = mergeSessions(native: [ndesk("dk2")],
+                        hooks: ["dk2": hsess("dk2", .running, age: 1)],
+                        desktop: [], now: now)
+check("desktop+hook: one row, native pid",
+      md8.count == 1 && md8.first?.pid == 777)
+check("desktop+hook: hook status overrides native idle",
+      md8.first?.status == .running)
+check("desktop+hook: flagged isDesktop",
+      md8.first?.isDesktop == true)
+// Even when hook says idle, the live native pid means the row is worth showing —
+// hook idle on a desktop entry means "done, awaiting input", not "gone".
+let md9 = mergeSessions(native: [ndesk("dk3")],
+                        hooks: ["dk3": hsess("dk3", .idle, age: 1)],
+                        desktop: [], now: now)
+check("desktop+idle hook still surfaces the live row",
+      md9.count == 1 && md9.first?.status == .idle && md9.first?.pid == 777)
+
 // --- Functional / edge-case coverage added below ---
 
 // Status.priority ordering should match the documented hierarchy

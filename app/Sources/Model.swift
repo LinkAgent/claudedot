@@ -168,9 +168,9 @@ func mapNativeStatus(_ status: String) -> Status {
 // They DO also register in the native ~/.claude/sessions dir (with
 // entrypoint == "claude-desktop", carrying a live pid) but with no
 // busy/waiting/updatedAt — so the native entry can't tell their status or age.
-// They do NOT run the user's hooks either, so there is no live busy/waiting/
-// error field anywhere — status is inferred from the session's transcript
-// (whose path comes from cliSessionId), and that inference owns the row.
+// Some of them DO run the user's hooks now (interactive Cowork sessions in
+// recent Claude Code builds), so when a hook state file exists for a desktop
+// session we prefer it; only fall back to transcript inference when it doesn't.
 struct DesktopSession {
     var sessionId: String   // == cliSessionId; maps to the transcript + token cache
     var cwd: String
@@ -280,17 +280,26 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
     var usedHookIds = Set<String>()
 
     // Desktop sessions also appear here with entrypoint "claude-desktop" and a
-    // live pid, but no busy/waiting/updatedAt. Don't surface them as native
-    // (idle, zero-age) rows — keep only their pid for liveness/jump and let the
-    // transcript-driven desktop pass below own the row.
+    // live pid, but no busy/waiting/updatedAt. When a hook state file exists
+    // for one we can merge it like any other native row (hook drives status,
+    // native gives pid for jump-to-session); otherwise we skip it here and let
+    // the transcript-driven desktop pass below own the row — without a hook the
+    // native entry alone would surface a misleading zero-age idle row.
     var desktopPid: [String: Int32] = [:]
     for n in native where n.entrypoint == "claude-desktop" { desktopPid[n.sessionId] = n.pid }
 
-    for n in native where n.entrypoint != "claude-desktop" {
+    for n in native {
         let h = hooks[n.sessionId]
+        if n.entrypoint == "claude-desktop" && h == nil { continue }
         if h != nil { usedHookIds.insert(n.sessionId) }
 
         var status = mapNativeStatus(n.nativeStatus)
+        // Desktop native entries carry no busy/waiting field, so mapNativeStatus
+        // always returns .idle for them — when a hook is present it's the ONLY
+        // live status signal, so let it drive (running / waiting / error alike).
+        if n.entrypoint == "claude-desktop", let h = h {
+            status = h.status
+        }
         // Error overlay: only our hooks know about tool failures. Apply while
         // the error is recent; if Claude has since gone busy/waiting natively
         // and the error aged out, the native status (recovery) wins.
@@ -312,7 +321,8 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
         out.append(Session(id: n.sessionId, folder: n.folder, cwd: n.cwd, status: status,
                            title: title, lastEvent: lastEvent, lastError: h?.lastError,
                            errorAt: h?.errorAt, updatedAt: updated, pid: n.pid,
-                           pendingTool: h?.pendingTool, pendingInput: h?.pendingInput))
+                           pendingTool: h?.pendingTool, pendingInput: h?.pendingInput,
+                           isDesktop: n.entrypoint == "claude-desktop"))
     }
 
     for (id, h) in hooks where !usedHookIds.contains(id) {

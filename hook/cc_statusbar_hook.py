@@ -152,8 +152,16 @@ def compute_update(payload, prev):
 
     elif event == "PreToolUse":
         tool = payload.get("tool_name", "tool")
-        state["status"] = "running"
-        state["last_event"] = "running " + _truncate(tool, 40)
+        # AskUserQuestion / ExitPlanMode "run" by blocking on the user — between
+        # this PreToolUse and PostToolUse the session is literally waiting for
+        # your answer, not executing anything. Mirror the userBlockingTools set
+        # in Model.swift (kept in sync).
+        if tool in ("AskUserQuestion", "ExitPlanMode"):
+            state["status"] = "waiting"
+            state["last_event"] = "asking: " + _truncate(tool, 40)
+        else:
+            state["status"] = "running"
+            state["last_event"] = "running " + _truncate(tool, 40)
         # Remember what a subsequent approval prompt would be about.
         state["pending_tool"] = tool
         state["pending_input"] = _pending_summary(payload)
@@ -177,9 +185,22 @@ def compute_update(payload, prev):
         state["status"] = "waiting"
         state["last_event"] = _truncate(msg, 100)
 
-    elif event in ("Stop", "SubagentStop"):
-        state["status"] = "idle"
+    elif event == "Stop":
+        # The agent's turn ended; the session is now literally blocked on the
+        # user to type the next prompt. That IS "needs input" — surface it as
+        # waiting (yellow) so the menu-bar dot reflects sessions you owe a reply
+        # to, rather than going green-only and hiding the asks. Mirrors desktop
+        # inference where AskUserQuestion / ExitPlanMode also yield .waiting
+        # regardless of age (see inferDesktopStatus in Model.swift).
+        state["status"] = "waiting"
         state["last_event"] = "done – awaiting input"
+        clear_pending()
+
+    elif event == "SubagentStop":
+        # A Task subagent finished; the parent agent is still running. Don't
+        # flip to waiting (the user isn't being asked anything yet).
+        state["status"] = "running"
+        state["last_event"] = "subagent done"
         clear_pending()
 
     elif event == "SessionEnd":

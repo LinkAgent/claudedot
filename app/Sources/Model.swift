@@ -62,7 +62,7 @@ struct Session {
     var isDesktop: Bool = false
 
     init?(json: [String: Any]) {
-        guard let id = json["session_id"] as? String else { return nil }
+        guard let id = json["session_id"] as? String, !id.isEmpty else { return nil }
         self.id = id
         self.pid = (json["pid"] as? Int).map(Int32.init)
             ?? (json["pid"] as? Double).map { Int32($0) }
@@ -190,8 +190,9 @@ struct DesktopSession {
         self.sessionId = cid
         self.cwd = (json["cwd"] as? String) ?? ""
         self.folder = (self.cwd as NSString).lastPathComponent
-        if self.folder.isEmpty { self.folder = self.cwd }
-        self.title = (json["title"] as? String) ?? self.folder
+        if self.folder.isEmpty { self.folder = self.cwd.isEmpty ? self.sessionId : self.cwd }
+        let rawTitle = (json["title"] as? String) ?? ""
+        self.title = rawTitle.isEmpty ? self.folder : rawTitle
         self.prState = json["prState"] as? String
         self.prNumber = (json["prNumber"] as? Int) ?? (json["prNumber"] as? Double).map { Int($0) }
         let ms = (json["lastActivityAt"] as? Double) ?? ((json["lastActivityAt"] as? Int).map(Double.init) ?? 0)
@@ -371,10 +372,10 @@ func aggregateStatus(_ sessions: [Session], now: Double = Date().timeIntervalSin
 
 // Compact a token/count into a short human string: 950, 1.5K, 12.4M, 2.0B.
 func formatCount(_ n: Int) -> String {
-    if n < 1_000 { return "\(n)" }
     let d = Double(n)
-    if n < 1_000_000     { return String(format: "%.1fK", d / 1_000) }
-    if n < 1_000_000_000 { return String(format: "%.1fM", d / 1_000_000) }
+    if abs(d) < 1_000          { return "\(n)" }
+    if abs(d) < 999_500        { return String(format: "%.1fK", d / 1_000) }
+    if abs(d) < 999_500_000    { return String(format: "%.1fM", d / 1_000_000) }
     return String(format: "%.1fB", d / 1_000_000_000)
 }
 

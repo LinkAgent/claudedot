@@ -85,6 +85,7 @@ def install(command):
 
 
 def uninstall():
+    existed = os.path.exists(SETTINGS)
     data = load()
     hooks = data.get("hooks", {})
     changed = False
@@ -97,8 +98,13 @@ def uninstall():
             changed = True
     if not hooks:
         data.pop("hooks", None)
-    save(data)
-    print("Removed status-bar hooks" if changed else "No status-bar hooks found")
+    if changed:
+        save(data)
+        print("Removed status-bar hooks")
+    elif existed:
+        print("No status-bar hooks found")
+    else:
+        print("No status-bar hooks found (no settings.json)")
 
 
 if __name__ == "__main__":

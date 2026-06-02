@@ -39,7 +39,13 @@ STATE_DIR = os.path.expanduser("~/.claude/statusbar/sessions")
 
 def _truncate(text, n=100):
     text = " ".join(str(text).split())
-    return text if len(text) <= n else text[: n - 1] + "…"
+    if len(text) <= n:
+        return text
+    if n <= 0:
+        return ""
+    if n == 1:
+        return "…"
+    return text[: n - 1] + "…"
 
 
 def _state_path(session_id):

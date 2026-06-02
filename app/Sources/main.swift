@@ -719,6 +719,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         island.onJump = { [weak self] pid, cwd, isDesktop in
             self?.jump(pid: pid, cwd: cwd, isDesktop: isDesktop)
         }
+        island.onOpenPopover = { [weak self] in self?.togglePopover() }
         refresh()
         refreshPopoverData(loadSessions()) // warm the cache so the first click is instant
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refresh() }
@@ -1344,66 +1345,101 @@ func renderOwls(to path: String) {
 }
 
 // Offscreen preview of the Dynamic Island for visual review without TCC
-// Screen Recording. Renders folded + expanded at three session counts
-// (0 / 2 / 5 non-idle) on a simulated desktop with a notch cutout, so the
-// notch-wrapping look + content-below-notch positioning can be inspected
-// from the resulting PNG. See issue #12.
+// Screen Recording. Renders every layout × variant on a simulated desktop with
+// a notch cutout, so the notch-wrapping look + content-below-notch positioning
+// can be inspected from the resulting PNG. See issue #12.
 func renderIslandSnapshot(to path: String) {
     let simulatedSafeTop: CGFloat = 37  // typical notch height on 14"/16" MBP
     let notchWidth: CGFloat = 200
     let menuBarH: CGFloat = 24
 
-    func host(for vms: [SessionVM], state: IslandState) -> (NSView, NSSize) {
+    func host(for vms: [SessionVM], layout: IslandLayout, variant: IslandCardVariant) -> (NSView, NSSize) {
         let size: NSSize
-        switch state {
-        case .folded:
-            size = IslandLayout.foldedSize(safeAreaTop: simulatedSafeTop)
-        case .expanded:
-            let n = vms.filter { $0.s.status != .idle }.count
-            size = IslandLayout.expandedSize(safeAreaTop: simulatedSafeTop,
-                                              rowCount: IslandLayout.visibleRows(n))
+        switch layout {
+        case .closed:
+            let agg = aggregateStatus(vms.map { $0.s })
+            size = IslandGeom.foldedSize(safeAreaTop: simulatedSafeTop, idle: agg == .idle)
+        case .opened:
+            let n = activeCount(vms.map { $0.s })
+            size = IslandGeom.expandedSize(safeAreaTop: simulatedSafeTop, variant: variant, rowCount: n)
         }
         let h = IslandHostView(frame: NSRect(origin: .zero, size: size))
-        h.topInset = IslandLayout.notchInset(safeAreaTop: simulatedSafeTop)
-        h.update(sessions: vms, state: state)
+        h.topInset = IslandGeom.notchInset(safeAreaTop: simulatedSafeTop)
+        h.update(sessions: vms, layout: layout, variant: variant)
         h.layoutSubtreeIfNeeded()
         return (h, size)
     }
 
-    // Three populations, drawn folded + expanded side-by-side per row.
-    let now = Date.distantPast.timeIntervalSince1970 + 1_700_000_000  // deterministic
+    // Use the real wall clock — the host view's IslandFoldedLabel /
+    // aggregateStatus calls default to Date().timeIntervalSince1970, so a stale
+    // fixed `now` would make every running session decay to idle in the
+    // snapshot. Determinism isn't worth that.
+    let now = Date().timeIntervalSince1970
     let pop0: [SessionVM] = []
-    let pop2: [SessionVM] = [
-        SessionVM(s: Session(id: "a", folder: "sample-api", cwd: "/x/sample-api",
-                             status: .waiting, lastEvent: "waiting · permission",
-                             updatedAt: now, pid: 1,
-                             pendingTool: "Bash", pendingInput: "npm test"), tokens: 0),
-        SessionVM(s: Session(id: "b", folder: "dashboard", cwd: "/x/dashboard",
-                             status: .running, lastEvent: "Running tests 14/38",
-                             updatedAt: now, pid: 2), tokens: 0),
+    let popRun: [SessionVM] = [
+        SessionVM(s: Session(id: "r1", folder: "refactor-status", cwd: "/x/refactor-status",
+                             status: .running, title: "refactor-status",
+                             lastEvent: "Bash · npm run build",
+                             updatedAt: now, pid: 1), tokens: 47_000),
+        SessionVM(s: Session(id: "r2", folder: "monorepo", cwd: "/x/monorepo",
+                             status: .running, title: "monorepo",
+                             lastEvent: "running tests 14/38",
+                             updatedAt: now - 10, pid: 2), tokens: 182_000),
     ]
-    let pop5: [SessionVM] = (0..<5).map { i in
-        SessionVM(s: Session(id: "s\(i)", folder: "proj-\(i)", cwd: "/x/proj-\(i)",
-                             status: [.running, .waiting, .running, .error, .running][i],
-                             lastEvent: "Working…", updatedAt: now, pid: Int32(100 + i)),
-                  tokens: 0)
+    let popWait: [SessionVM] = [
+        SessionVM(s: Session(id: "w1", folder: "sample-api", cwd: "/x/sample-api",
+                             status: .waiting, title: "sample-api",
+                             lastEvent: "waiting · permission",
+                             updatedAt: now, pid: 11,
+                             pendingTool: "Bash", pendingInput: "npm test --watch"), tokens: 9_100),
+    ]
+    let popErr: [SessionVM] = [
+        SessionVM(s: Session(id: "e1", folder: "release-tools", cwd: "/x/release-tools",
+                             status: .error, title: "release-tools",
+                             lastEvent: "Edit failed",
+                             lastError: "settings.swift · permission denied",
+                             errorAt: now - 5, updatedAt: now - 5, pid: 21,
+                             pendingTool: "Edit"), tokens: 3_100),
+    ]
+    let popList: [SessionVM] = [
+        SessionVM(s: Session(id: "L1", folder: "claudedot · refactor status bar", cwd: "/x/claudedot",
+                             status: .waiting, title: "claudedot · refactor",
+                             updatedAt: now, pid: 1,
+                             pendingTool: "Bash", pendingInput: "npm test --watch"), tokens: 182_000),
+        SessionVM(s: Session(id: "L2", folder: "monorepo · dependency upgrade", cwd: "/x/mono",
+                             status: .running, title: "monorepo",
+                             lastEvent: "24s ago", updatedAt: now - 24, pid: 2), tokens: 47_000),
+        SessionVM(s: Session(id: "L3", folder: "notes-cli · prompt experiments", cwd: "/x/notes",
+                             status: .error, title: "notes-cli",
+                             lastError: "settings.swift",
+                             errorAt: now - 10, updatedAt: now - 10, pid: 3,
+                             pendingTool: "Edit"), tokens: 9_100),
+    ]
+    let popMany: [SessionVM] = (0..<7).map { i in
+        SessionVM(s: Session(id: "m\(i)", folder: "proj-\(i)", cwd: "/x/proj-\(i)",
+                             status: [.running, .waiting, .running, .error, .running, .running, .waiting][i],
+                             title: "project \(i)",
+                             lastEvent: "Working…", updatedAt: now, pid: Int32(100 + i),
+                             pendingTool: "Bash"), tokens: 12_000 * (i + 1))
     }
 
-    struct Cell { let label: String; let vms: [SessionVM]; let state: IslandState }
+    struct Cell { let label: String; let vms: [SessionVM]; let layout: IslandLayout; let variant: IslandCardVariant }
     let cells: [Cell] = [
-        Cell(label: "Folded · 0 sessions",  vms: pop0, state: .folded),
-        Cell(label: "Expanded · 0 sessions", vms: pop0, state: .expanded),
-        Cell(label: "Folded · 2 sessions",  vms: pop2, state: .folded),
-        Cell(label: "Expanded · 2 sessions", vms: pop2, state: .expanded),
-        Cell(label: "Folded · 5 sessions",  vms: pop5, state: .folded),
-        Cell(label: "Expanded · 5 sessions", vms: pop5, state: .expanded),
+        Cell(label: "Closed · idle (140pt)",       vms: pop0,    layout: .closed, variant: .sessionList),
+        Cell(label: "Closed · running",            vms: popRun,  layout: .closed, variant: .sessionList),
+        Cell(label: "Closed · waiting (accent)",   vms: popWait, layout: .closed, variant: .sessionList),
+        Cell(label: "Closed · error",              vms: popErr,  layout: .closed, variant: .sessionList),
+        Cell(label: "Opened · sessionList ×3",     vms: popList, layout: .opened, variant: .sessionList),
+        Cell(label: "Opened · sessionList +more",  vms: popMany, layout: .opened, variant: .sessionList),
+        Cell(label: "Opened · approvalCard",       vms: popWait, layout: .opened, variant: .approval(sessionId: "w1")),
+        Cell(label: "Opened · completionCard",     vms: popRun,  layout: .opened, variant: .completion(sessionId: "r1")),
     ]
 
     // Each cell shows a simulated screen top-strip (menu bar + notch) with the
     // island composited at its real position. Cell width must accommodate the
     // expanded island plus padding.
     let cellW: CGFloat = 520
-    let cellH: CGFloat = 200
+    let cellH: CGFloat = 320
     let cols = 2
     let rows = (cells.count + cols - 1) / cols
     let pad: CGFloat = 24
@@ -1453,7 +1489,7 @@ func renderIslandSnapshot(to path: String) {
 
         // Render the island host into the cell, aligned so its top edge
         // matches the simulated screen top (mirroring real placement).
-        let (view, sz) = host(for: cell.vms, state: cell.state)
+        let (view, sz) = host(for: cell.vms, layout: cell.layout, variant: cell.variant)
         let islandX = bg.midX - sz.width / 2
         let islandY = bg.maxY - sz.height
         let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!

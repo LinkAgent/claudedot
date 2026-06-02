@@ -44,8 +44,13 @@ check("stale running decays to idle",
       aggregateStatus([sess(.running, age: 120)], now: now) == .idle)
 check("fresh running stays running",
       aggregateStatus([sess(.running, age: 10)], now: now) == .running)
-check("stale error still shows (attention persists)",
-      aggregateStatus([sess(.error, age: 100000)], now: now) == .error)
+// Errors are transient in the aggregate: a fresh error shows, but one past the
+// runningLivenessWindow (90s) decays to idle so native recovery can win — see
+// the dynamic-island spec's §3 error transience note + aggregateStatus().
+check("fresh error shows",
+      aggregateStatus([sess(.error, age: 10)], now: now) == .error)
+check("stale error decays to idle (transient)",
+      aggregateStatus([sess(.error, age: 100000)], now: now) == .idle)
 
 // --- relativeAge ---
 check("just now", relativeAge(now, now: now) == "just now")
@@ -352,6 +357,96 @@ let tie1 = mergeSessions(
              NativeSession(pid: 2, sessionId: "b", cwd: "/a/b", nativeStatus: "busy", updatedAt: now)],
     hooks: [:], now: now)
 check("merge sort tie keeps both rows", tie1.count == 2)
+
+// --- Dynamic Island: activeCount + islandFoldedLabel ---
+// activeCount mirrors the aggregate rules (running needs to be recent;
+// error needs to be within its 90s window).
+let icSessions: [Session] = [
+    Session(id: "r1", status: .running, updatedAt: now - 10),
+    Session(id: "r2", status: .running, updatedAt: now - 200), // stale -> doesn't count
+    Session(id: "w1", status: .waiting, updatedAt: now - 5000), // waiting never decays
+    Session(id: "e1", status: .error, errorAt: now - 10, updatedAt: now - 10),
+    Session(id: "e2", status: .error, errorAt: now - 200, updatedAt: now - 200), // stale -> doesn't count
+    Session(id: "i1", status: .idle, updatedAt: now),
+]
+check("activeCount counts fresh running + waiting + fresh error",
+      activeCount(icSessions, now: now) == 3)
+check("activeCount empty -> 0", activeCount([], now: now) == 0)
+
+// Stale error (>90s) decays out of aggregateStatus
+let staleErr = Session(id: "e", status: .error, errorAt: now - 200, updatedAt: now - 200)
+check("stale error decays in aggregate",
+      aggregateStatus([staleErr], now: now) == .idle)
+
+// islandFoldedLabel — empty → idle "Claude Dot"
+let l0 = islandFoldedLabel(sessions: [], now: now)
+check("idle label main", l0.main == "Claude Dot")
+check("idle label kind", l0.kind == .idle)
+check("idle label sub empty", l0.sub == "")
+
+// Running session → "Running · <title>"
+let lr = islandFoldedLabel(sessions: [
+    Session(id: "r", folder: "refactor-status", status: .running,
+            title: "refactor-status", lastEvent: "Bash · npm run build",
+            updatedAt: now - 5),
+], now: now)
+check("running label kind", lr.kind == .running)
+check("running label main starts with Running · ", lr.main.hasPrefix("Running · "))
+check("running label sub uses lastEvent", lr.sub.contains("Bash"))
+
+// Waiting beats running and uses accent
+let lw = islandFoldedLabel(sessions: [
+    Session(id: "r", folder: "x", status: .running, updatedAt: now - 5),
+    Session(id: "w", folder: "sample-api", status: .waiting,
+            updatedAt: now - 2, pendingTool: "Bash", pendingInput: "npm test --watch"),
+], now: now)
+check("waiting wins over running", lw.kind == .waiting)
+check("waiting main = Awaiting · <tool>", lw.main == "Awaiting · Bash")
+check("waiting sub = pending_input", lw.sub == "npm test --watch")
+
+// Error beats waiting (and only counts within the 90s window)
+let le = islandFoldedLabel(sessions: [
+    Session(id: "w", status: .waiting, updatedAt: now - 2, pendingTool: "Bash"),
+    Session(id: "e", folder: "release-tools", status: .error,
+            lastError: "permission denied", errorAt: now - 10,
+            updatedAt: now - 10, pendingTool: "Edit"),
+], now: now)
+check("error wins overall", le.kind == .error)
+check("error main = Error · <tool>", le.main == "Error · Edit")
+check("error sub = last_error", le.sub == "permission denied")
+
+// Aged-out error: 91s old → no longer error → waiting wins
+let leStale = islandFoldedLabel(sessions: [
+    Session(id: "w", status: .waiting, updatedAt: now - 2, pendingTool: "Bash"),
+    Session(id: "e", status: .error, lastError: "old",
+            errorAt: now - 100, updatedAt: now - 100, pendingTool: "Edit"),
+], now: now)
+check("aged-out error yields to waiting", leStale.kind == .waiting)
+
+// islandTruncate length & ellipsis
+check("truncate keeps short", islandTruncate("short", 12) == "short")
+check("truncate adds ellipsis when long",
+      islandTruncate("0123456789ABCD", 8) == "0123456…")
+check("truncate result length ≤ n",
+      islandTruncate("0123456789ABCD", 8).count <= 8)
+
+// Variant routing: AskUserQuestion → question, regular tool → approval
+check("variant for AskUserQuestion -> question",
+      islandVariantFor(pendingTool: "AskUserQuestion") == .question)
+check("variant for ExitPlanMode -> question",
+      islandVariantFor(pendingTool: "ExitPlanMode") == .question)
+check("variant for Bash -> approval",
+      islandVariantFor(pendingTool: "Bash") == .approval)
+check("variant for nil tool -> approval",
+      islandVariantFor(pendingTool: nil) == .approval)
+
+// islandFocusSession picks the freshest of the relevant class
+let waiters = [
+    Session(id: "old", status: .waiting, updatedAt: now - 50, pendingTool: "Bash"),
+    Session(id: "new", status: .waiting, updatedAt: now - 1,  pendingTool: "Edit"),
+]
+check("focus picks freshest waiting",
+      islandFocusSession(waiters, aggregate: .waiting, now: now)?.id == "new")
 
 print("")
 if failures > 0 { print("FAILED: \(failures)"); exit(1) }

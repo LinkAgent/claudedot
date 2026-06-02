@@ -1,13 +1,17 @@
 // Dynamic Island — a top-center floating capsule that mirrors the live aggregate
-// session state. Folded: a status dot + active-session count. Hovered: expands
-// to a list of non-idle sessions, each clickable to jump back to its terminal.
+// session state. Always pure black so it blends with the MacBook notch.
 //
-// Pinned to the MacBook's built-in display (the one carrying the notch). When
-// the lid is closed in clamshell mode the built-in screen isn't in
-// `NSScreen.screens`, and the island hides — by design (its whole visual gag
-// is wrapping the notch; no notch, no island). On a Mac without notch hardware
-// at all (Mac mini, MBA M1) it falls back to a slim capsule tucked under the
-// menu bar so desktop users still get the surface.
+// Surface model (§4 of design/dynamic-island.html):
+//
+//   layout: closed | opened       × variant: sessionList | approval | question | completion
+//
+// closed shows 3 things only: face-changing owl, activeCount, and the highest-
+// priority status line (error > waiting > running > idle). Hovering for ≥180ms
+// opens to `sessionList`. Hook events route to the card variants:
+//   • a session entering .waiting    → approval (or question, for AskUserQuestion)
+//   • a session completing           → completion
+// Cards are temporary surfaces — they auto-collapse after 12s / 12s / 6s
+// respectively, and collapse immediately once the pointer enters & leaves.
 //
 // Coexists with the menu-bar owl (both update from the same `refresh()` tick in
 // AppDelegate). Toggled from the popover footer; preference persisted in
@@ -19,49 +23,67 @@
 
 import AppKit
 
-enum IslandState { case folded, expanded }
+// MARK: - Surface model
 
-// MARK: - Layout (pure)
+enum IslandLayout: Equatable { case closed, opened }
 
-// Pure layout math, kept separate from AppKit window/view machinery so the
-// snapshot renderer + future unit tests can exercise it without instantiating
-// an NSPanel.
-struct IslandLayout {
-    // Folded must be wide enough to comfortably encompass the notch (~200pt on
-    // 14/16" MacBooks) so the capsule visually wraps it AND there's a generous
-    // hit target on each side for hover (see issue #14). Height = notch halo +
-    // content strip (the part visible BELOW the notch).
-    static let foldedWidth: CGFloat = 320
-    static let foldedContentH: CGFloat = 32
-    static let expandedWidth: CGFloat = 420
-    static let rowHeight: CGFloat = 36
-    static let listVPad: CGFloat = 8
+enum IslandCardVariant: Equatable {
+    case sessionList
+    case approval(sessionId: String)
+    case question(sessionId: String)
+    case completion(sessionId: String)
 
-    // The non-content "halo" — pixels reserved at the top of the capsule that
-    // overlap the notch cutout. 0 on non-notch Macs.
+    var priority: Int {
+        switch self {
+        case .approval:    return 4
+        case .question:    return 3
+        case .completion:  return 2
+        case .sessionList: return 1
+        }
+    }
+}
+
+// Geometry constants per §7 of the spec. Pure so the snapshot renderer and
+// future unit tests can use them without standing up an NSPanel.
+struct IslandGeom {
+    static let foldedW: CGFloat = 250
+    static let foldedIdleW: CGFloat = 140
+    static let foldedH: CGFloat = 24        // content strip BELOW the notch
+    static let expandedW: CGFloat = 420
+    static let rowH: CGFloat = 38
+    static let headH: CGFloat = 40
+    static let listVPad: CGFloat = 6
+    static let footH: CGFloat = 22
+    static let cardVPad: CGFloat = 10
+    static let approvalH: CGFloat = 124
+    static let questionH: CGFloat = 160
+    static let completionH: CGFloat = 112
+    static let maxRows: Int = 5
+
     static func notchInset(safeAreaTop: CGFloat) -> CGFloat { safeAreaTop }
 
-    static func foldedSize(safeAreaTop: CGFloat) -> NSSize {
-        NSSize(width: foldedWidth, height: notchInset(safeAreaTop: safeAreaTop) + foldedContentH)
+    static func foldedSize(safeAreaTop: CGFloat, idle: Bool) -> NSSize {
+        let w = idle ? foldedIdleW : foldedW
+        return NSSize(width: w, height: notchInset(safeAreaTop: safeAreaTop) + foldedH)
     }
 
-    static func expandedSize(safeAreaTop: CGFloat, rowCount: Int) -> NSSize {
-        let rows = max(1, rowCount)
-        let h = notchInset(safeAreaTop: safeAreaTop) + listVPad * 2 + CGFloat(rows) * rowHeight
-        return NSSize(width: expandedWidth, height: h)
+    static func expandedSize(safeAreaTop: CGFloat,
+                              variant: IslandCardVariant,
+                              rowCount: Int) -> NSSize {
+        let inset = notchInset(safeAreaTop: safeAreaTop)
+        let body: CGFloat
+        switch variant {
+        case .sessionList:
+            let rows = max(1, min(rowCount, maxRows))
+            let overflow: CGFloat = rowCount > maxRows ? rowH * 0.7 : 0
+            body = headH + listVPad * 2 + CGFloat(rows) * rowH + overflow + footH
+        case .approval:    body = headH + approvalH
+        case .question:    body = headH + questionH
+        case .completion:  body = headH + completionH
+        }
+        return NSSize(width: expandedW, height: inset + body)
     }
 
-    // Number of vertical rows the expanded view will draw given the session
-    // list. Bounded at 6, plus an extra row for "+N more" when truncating.
-    // Returns 1 (a placeholder "No active sessions" row) when the list is empty.
-    static func visibleRows(_ nonIdleCount: Int) -> Int {
-        if nonIdleCount == 0 { return 1 }
-        return min(nonIdleCount, 6) + (nonIdleCount > 6 ? 1 : 0)
-    }
-
-    // Origin of the panel on a notch-bearing screen: centered horizontally on
-    // the screen, top edge AT the screen top so the notch eats into the
-    // capsule and reads as one continuous pill.
     static func origin(on screenFrame: NSRect, size: NSSize, hasNotch: Bool,
                        menuBarHeight: CGFloat) -> NSPoint {
         let x = screenFrame.midX - size.width / 2
@@ -69,10 +91,35 @@ struct IslandLayout {
         if hasNotch {
             y = screenFrame.maxY - size.height
         } else {
-            // No notch: tuck a hair under the menu bar.
             y = screenFrame.maxY - menuBarHeight - 2 - size.height
         }
         return NSPoint(x: x, y: y)
+    }
+}
+
+// Dark palette — only the dark-theme tokens from DESIGN.md, NOT the
+// menu-bar owl's Evernote/Giallo set. The island is always on a black field,
+// so it needs the higher-contrast dark-mode palette.
+enum IslandPalette {
+    static let bg     = NSColor.black
+    static let ink    = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 1)
+    static let ink2   = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.62)
+    static let ink3   = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.36)
+    static let accent = NSColor(srgbRed: 233/255, green: 105/255, blue:  69/255, alpha: 1)
+    static let green  = NSColor(srgbRed: 122/255, green: 155/255, blue: 118/255, alpha: 1)
+    static let red    = NSColor(srgbRed: 210/255, green: 122/255, blue: 102/255, alpha: 1)
+    static let border = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.10)
+
+    // Color of the pulse dot for each status. Per §5 of the spec: running uses
+    // ink-3 (a low-key gray pulse — running is not the call-to-action), waiting
+    // uses the accent (the island's strongest signal), error uses red.
+    static func dotColor(for kind: IslandLabelKind) -> NSColor {
+        switch kind {
+        case .running: return ink3
+        case .waiting: return accent
+        case .error:   return red
+        case .idle:    return NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.18)
+        }
     }
 }
 
@@ -83,22 +130,34 @@ final class DynamicIslandController {
 
     private var panel: NSPanel?
     private var host: IslandHostView?
-    private(set) var state: IslandState = .folded
+    private(set) var layout: IslandLayout = .closed
+    private(set) var variant: IslandCardVariant = .sessionList
+    // Timers
+    private var hoverOpenWork: DispatchWorkItem?
     private var collapseWork: DispatchWorkItem?
+    private var cardExpireWork: DispatchWorkItem?
     private var screenObs: NSObjectProtocol?
     private var spaceObs: NSObjectProtocol?
 
-    // Whether this Mac was observed to have a built-in notch at any point in
-    // this session. Lets us distinguish "no notch hardware" (Mac mini / MBA M1
-    // → show under-menu-bar fallback) from "notch closed in clamshell" (hide
-    // entirely).
+    // Per-session debouncing: card variant → (sessionId → last-shown epoch).
+    // Same (variant, session) won't auto-re-trigger within 30s of being shown,
+    // per §6 ("已经折回的事件不重复推: 30s 内同一会话不重弹同类卡片").
+    private var lastCardShown: [String: Double] = [:]
+    private let cardDedupeWindow: Double = 30
+
+    // Snapshot of each session's status from the prior update tick. Used to
+    // detect transitions: idle→waiting (open approval/question card),
+    // non-idle→idle (open completion card).
+    private var prevStatus: [String: Status] = [:]
+    private var prevPendingTool: [String: String?] = [:]
+
     private var sawNotchHardware: Bool = false
 
     private var lastSessions: [SessionVM] = []
-    private var lastTheme: Theme = .light
     private let debug: Bool = ProcessInfo.processInfo.environment["CLAUDEDOT_DEBUG_ISLAND"] != nil
 
     var onJump: (Int32?, String, Bool) -> Void = { _, _, _ in }
+    var onOpenPopover: () -> Void = {}
 
     var enabled: Bool {
         get { UserDefaults.standard.object(forKey: Self.defaultsKey) as? Bool ?? true }
@@ -106,7 +165,7 @@ final class DynamicIslandController {
             UserDefaults.standard.set(newValue, forKey: Self.defaultsKey)
             if newValue {
                 ensurePanel()
-                pushUpdate()
+                pushUpdate(animated: false)
             } else {
                 panel?.orderOut(nil)
             }
@@ -116,12 +175,10 @@ final class DynamicIslandController {
     init() {
         screenObs = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil, queue: .main) { [weak self] _ in self?.pushUpdate() }
-        // Other apps entering/exiting fullscreen swap spaces; this is the
-        // reliable signal (NSMenu.menuBarVisible is app-local — see #13).
+            object: nil, queue: .main) { [weak self] _ in self?.pushUpdate(animated: false) }
         spaceObs = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil, queue: .main) { [weak self] _ in self?.pushUpdate() }
+            object: nil, queue: .main) { [weak self] _ in self?.pushUpdate(animated: false) }
     }
 
     deinit {
@@ -129,18 +186,92 @@ final class DynamicIslandController {
         if let o = spaceObs { NSWorkspace.shared.notificationCenter.removeObserver(o) }
     }
 
-    // Called by AppDelegate.refresh() on every tick.
+    // Called by AppDelegate.refresh() on every 1.5s tick.
     func update(sessions: [SessionVM], theme: Theme) {
+        let prev = lastSessions
         lastSessions = sessions
-        lastTheme = theme
         guard enabled else { return }
-        pushUpdate()
+        detectTransitions(prev: prev, curr: sessions)
+        pushUpdate(animated: false)
+    }
+
+    // Compare prior vs. current sessions and auto-expand to a card surface on
+    // newly-arrived events. Debounced per (session, variant) within 30s.
+    private func detectTransitions(prev: [SessionVM], curr: [SessionVM]) {
+        let now = Date().timeIntervalSince1970
+        var newPrevStatus: [String: Status] = [:]
+        var newPrevTool: [String: String?] = [:]
+        let prevById = Dictionary(uniqueKeysWithValues: prev.map { ($0.s.id, $0.s) })
+        var bestTrigger: IslandCardVariant?
+
+        for vm in curr {
+            let s = vm.s
+            let was = prevStatus[s.id] ?? (prevById[s.id]?.status ?? .idle)
+            let wasTool = prevPendingTool[s.id] ?? prevById[s.id]?.pendingTool
+            newPrevStatus[s.id] = s.status
+            newPrevTool[s.id] = s.pendingTool
+
+            // idle/running → waiting: a permission/question card just arrived
+            if s.status == .waiting && was != .waiting {
+                let v: IslandCardVariant = islandVariantFor(pendingTool: s.pendingTool) == .question
+                    ? .question(sessionId: s.id) : .approval(sessionId: s.id)
+                if shouldShow(v, now: now) {
+                    bestTrigger = bestOf(bestTrigger, v)
+                }
+            }
+            // A new pending tool name on an already-waiting session also counts
+            // — the old card has expired or the user moved on, and now a fresh
+            // approval is pending.
+            else if s.status == .waiting && s.pendingTool != nil && s.pendingTool != (wasTool ?? nil) {
+                let v: IslandCardVariant = islandVariantFor(pendingTool: s.pendingTool) == .question
+                    ? .question(sessionId: s.id) : .approval(sessionId: s.id)
+                if shouldShow(v, now: now) {
+                    bestTrigger = bestOf(bestTrigger, v)
+                }
+            }
+
+            // Non-idle → idle: a session just completed
+            if was != .idle && s.status == .idle {
+                let v: IslandCardVariant = .completion(sessionId: s.id)
+                if shouldShow(v, now: now) {
+                    bestTrigger = bestOf(bestTrigger, v)
+                }
+            }
+        }
+
+        prevStatus = newPrevStatus
+        prevPendingTool = newPrevTool
+
+        if let v = bestTrigger {
+            present(variant: v)
+            stamp(v, at: now)
+        }
+    }
+
+    private func shouldShow(_ v: IslandCardVariant, now: Double) -> Bool {
+        guard let key = dedupeKey(v) else { return true }
+        if let last = lastCardShown[key], now - last < cardDedupeWindow { return false }
+        return true
+    }
+    private func stamp(_ v: IslandCardVariant, at now: Double) {
+        if let k = dedupeKey(v) { lastCardShown[k] = now }
+    }
+    private func dedupeKey(_ v: IslandCardVariant) -> String? {
+        switch v {
+        case .sessionList:           return nil
+        case .approval(let id):      return "approval:\(id)"
+        case .question(let id):      return "question:\(id)"
+        case .completion(let id):    return "completion:\(id)"
+        }
+    }
+    private func bestOf(_ a: IslandCardVariant?, _ b: IslandCardVariant) -> IslandCardVariant {
+        guard let a = a else { return b }
+        return b.priority > a.priority ? b : a
     }
 
     // The one place that reconciles "what should be on screen right now" with
-    // the panel — re-checks screen presence, fullscreen state, sizing, and
-    // content. Safe to call repeatedly.
-    private func pushUpdate() {
+    // the panel. Safe to call repeatedly.
+    private func pushUpdate(animated: Bool) {
         guard enabled else { return }
         let target = resolveTarget()
         switch target {
@@ -150,9 +281,9 @@ final class DynamicIslandController {
         case .visible(let screen, let safeAreaTop, let hasNotch):
             ensurePanel()
             if hasNotch { sawNotchHardware = true }
-            host?.topInset = IslandLayout.notchInset(safeAreaTop: safeAreaTop)
-            host?.update(sessions: lastSessions, state: state)
-            applyFrame(on: screen, safeAreaTop: safeAreaTop, hasNotch: hasNotch, animated: false)
+            host?.topInset = IslandGeom.notchInset(safeAreaTop: safeAreaTop)
+            host?.update(sessions: lastSessions, layout: layout, variant: variant)
+            applyFrame(on: screen, safeAreaTop: safeAreaTop, hasNotch: hasNotch, animated: animated)
             if panel?.isVisible == false { panel?.orderFrontRegardless() }
         }
     }
@@ -162,9 +293,6 @@ final class DynamicIslandController {
         case visible(NSScreen, safeAreaTop: CGFloat, hasNotch: Bool)
     }
 
-    // Decide whether and where to show. Hides in clamshell (notch was seen
-    // before but no notch screen present now) and when a fullscreen app has
-    // taken over the screen we'd be on.
     private func resolveTarget() -> Target {
         let notchScreen: NSScreen? = {
             if #available(macOS 12.0, *) {
@@ -172,7 +300,6 @@ final class DynamicIslandController {
             }
             return nil
         }()
-
         if let s = notchScreen {
             let safe: CGFloat = {
                 if #available(macOS 12.0, *) { return s.safeAreaInsets.top }
@@ -180,24 +307,14 @@ final class DynamicIslandController {
             }()
             return .visible(s, safeAreaTop: safe, hasNotch: true)
         }
-
-        // No notch in current screen set.
-        if sawNotchHardware {
-            // We're on a notch MBP but the built-in display went away —
-            // clamshell with lid closed. Hide.
-            return .hidden
-        }
-
-        // True non-notch Mac (mini, Studio, MBA M1, older MBPs). Tuck under
-        // the menu bar on the main screen so the surface is still useful.
+        if sawNotchHardware { return .hidden }
         guard let main = NSScreen.main else { return .hidden }
         return .visible(main, safeAreaTop: 0, hasNotch: false)
     }
 
     private func ensurePanel() {
         if panel != nil { return }
-        // Sized minimally; the next applyFrame will set the real geometry.
-        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: IslandLayout.foldedWidth, height: 64),
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: IslandGeom.foldedW, height: 64),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         p.isFloatingPanel = true
@@ -209,27 +326,76 @@ final class DynamicIslandController {
         p.hidesOnDeactivate = false
         p.isMovable = false
         p.becomesKeyOnlyIfNeeded = true
-        let h = IslandHostView(frame: NSRect(x: 0, y: 0, width: IslandLayout.foldedWidth, height: 64))
+        let h = IslandHostView(frame: NSRect(x: 0, y: 0, width: IslandGeom.foldedW, height: 64))
         h.controller = self
         p.contentView = h
         panel = p
         host = h
     }
 
-    func setState(_ s: IslandState) {
-        guard s != state else { return }
-        state = s
-        // Re-run the whole reconciler so animated frame change picks the
-        // right size + the host rebuilds its content for the new state.
+    // MARK: - State transitions
+
+    // Set the visible surface. Used internally and by hover handlers in
+    // IslandHostView. Animated.
+    func setLayout(_ l: IslandLayout, variant v: IslandCardVariant = .sessionList) {
+        // Idempotent — but always cancel pending hover-open work, so a quick
+        // exit doesn't get re-opened by a late timer.
+        if l == .closed { hoverOpenWork?.cancel(); hoverOpenWork = nil }
+        let changed = (l != layout) || (v != variant)
+        layout = l
+        variant = v
+        guard changed else { return }
         guard case .visible(let screen, let safeAreaTop, let hasNotch) = resolveTarget() else { return }
-        host?.topInset = IslandLayout.notchInset(safeAreaTop: safeAreaTop)
-        host?.update(sessions: lastSessions, state: s)
+        host?.topInset = IslandGeom.notchInset(safeAreaTop: safeAreaTop)
+        host?.update(sessions: lastSessions, layout: l, variant: v)
         applyFrame(on: screen, safeAreaTop: safeAreaTop, hasNotch: hasNotch, animated: true)
     }
 
+    // Auto-expand to a card. Schedules its expiration timer per §6.
+    func present(variant v: IslandCardVariant) {
+        cardExpireWork?.cancel()
+        let delay: TimeInterval
+        switch v {
+        case .sessionList:  delay = 0  // no expiration — user-driven
+        case .approval:     delay = 12
+        case .question:     delay = 12
+        case .completion:   delay = 6
+        }
+        setLayout(.opened, variant: v)
+        if delay > 0 {
+            let w = DispatchWorkItem { [weak self] in self?.setLayout(.closed) }
+            cardExpireWork = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
+        }
+    }
+
+    // Hover lifecycle from the host view.
+    func hoverEntered() {
+        cancelCollapse()
+        hoverOpenWork?.cancel()
+        // Don't override an active card with the sessionList just because the
+        // user hovered over it — they can still see and click it.
+        if case .opened = layout, case .sessionList = variant { return }
+        if case .opened = layout, variant.priority > IslandCardVariant.sessionList.priority { return }
+        let w = DispatchWorkItem { [weak self] in self?.setLayout(.opened, variant: .sessionList) }
+        hoverOpenWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: w)
+    }
+    func hoverExited() {
+        hoverOpenWork?.cancel(); hoverOpenWork = nil
+        // §6: pointer enters card & leaves → collapse immediately (look-and-go).
+        // For sessionList we keep the 400ms grace so the user has time to move
+        // onto a row without it slipping away.
+        let delay: TimeInterval
+        switch variant {
+        case .sessionList: delay = 0.4
+        case .approval, .question, .completion: delay = 0
+        }
+        scheduleCollapse(delay: delay)
+    }
     func scheduleCollapse(delay: TimeInterval = 0.4) {
         collapseWork?.cancel()
-        let w = DispatchWorkItem { [weak self] in self?.setState(.folded) }
+        let w = DispatchWorkItem { [weak self] in self?.setLayout(.closed) }
         collapseWork = w
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
     }
@@ -237,28 +403,31 @@ final class DynamicIslandController {
 
     private func applyFrame(on screen: NSScreen, safeAreaTop: CGFloat, hasNotch: Bool, animated: Bool) {
         guard let panel = panel else { return }
-        let size: NSSize
-        switch state {
-        case .folded:
-            size = IslandLayout.foldedSize(safeAreaTop: safeAreaTop)
-        case .expanded:
-            let nonIdle = lastSessions.filter { $0.s.status != .idle }.count
-            size = IslandLayout.expandedSize(safeAreaTop: safeAreaTop,
-                                             rowCount: IslandLayout.visibleRows(nonIdle))
-        }
-        let origin = IslandLayout.origin(on: screen.frame, size: size,
-                                          hasNotch: hasNotch,
-                                          menuBarHeight: NSStatusBar.system.thickness)
+        let size: NSSize = sizeForState(safeAreaTop: safeAreaTop)
+        let origin = IslandGeom.origin(on: screen.frame, size: size,
+                                       hasNotch: hasNotch,
+                                       menuBarHeight: NSStatusBar.system.thickness)
         let r = NSRect(origin: origin, size: size)
-        log("applyFrame state=\(state) screen=\(screen.frame) safeTop=\(safeAreaTop) panel=\(r)")
+        log("applyFrame layout=\(layout) variant=\(variant) screen=\(screen.frame) safeTop=\(safeAreaTop) panel=\(r)")
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.22
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                ctx.duration = 0.28
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
                 panel.animator().setFrame(r, display: true)
             }
         } else {
             panel.setFrame(r, display: true)
+        }
+    }
+
+    private func sizeForState(safeAreaTop: CGFloat) -> NSSize {
+        switch layout {
+        case .closed:
+            let agg = aggregateStatus(lastSessions.map { $0.s })
+            return IslandGeom.foldedSize(safeAreaTop: safeAreaTop, idle: agg == .idle)
+        case .opened:
+            let nonIdle = activeCount(lastSessions.map { $0.s })
+            return IslandGeom.expandedSize(safeAreaTop: safeAreaTop, variant: variant, rowCount: nonIdle)
         }
     }
 
@@ -268,21 +437,20 @@ final class DynamicIslandController {
     }
 }
 
-// MARK: - View
+// MARK: - Host view
 
-// The panel's content view: paints the capsule background, hosts the inner
-// stack, owns the hover tracking that drives expand/collapse.
+// The panel's content view. Paints the black pill, hosts the inner content,
+// owns the hover tracking that drives expand/collapse.
 final class IslandHostView: NSView {
     weak var controller: DynamicIslandController?
     private var tracking: NSTrackingArea?
     private var inner: NSView?
     private var bgLayer: CALayer?
     private var currentSessions: [SessionVM] = []
+    private var currentLayout: IslandLayout = .closed
+    private var currentVariant: IslandCardVariant = .sessionList
     private var lastSig: String = ""
 
-    // Pixels reserved at the top for the notch cutout. Content sits beneath
-    // this so the notch overlaps an empty, fully-black halo and reads as part
-    // of the capsule.
     var topInset: CGFloat = 0 {
         didSet { if topInset != oldValue { lastSig = ""; needsLayout = true } }
     }
@@ -290,48 +458,52 @@ final class IslandHostView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        let root = CALayer()
-        layer = root
+        layer = CALayer()
         let bg = CALayer()
         bg.cornerCurve = .continuous
-        bg.borderWidth = 0.5
-        bg.backgroundColor = NSColor.black.cgColor
-        bg.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
-        root.addSublayer(bg)
+        bg.backgroundColor = IslandPalette.bg.cgColor
+        layer?.addSublayer(bg)
         bgLayer = bg
     }
     required init?(coder: NSCoder) { fatalError() }
-
     override var isFlipped: Bool { false }
 
-    func update(sessions: [SessionVM], state: IslandState) {
+    func update(sessions: [SessionVM], layout: IslandLayout, variant: IslandCardVariant) {
         currentSessions = sessions
-        // Signature covers everything the island actually renders. Theme is
-        // pinned to dark (island always blends with the notch's black), so it
-        // isn't in the signature. topInset clears the sig via its didSet.
-        let sig: String
-        if state == .folded {
-            let agg = aggregateStatus(sessions.map { $0.s })
-            let active = sessions.filter { $0.s.status != .idle }.count
-            sig = "F|\(agg.rawValue)|\(active)"
-        } else {
-            sig = "E|" + sessions.filter { $0.s.status != .idle }.prefix(6).map {
-                "\($0.s.id):\($0.s.status.rawValue):\($0.s.folder)"
-            }.joined(separator: "|")
-        }
+        currentLayout = layout
+        currentVariant = variant
+        // Signature covers what's actually drawn so we don't rebuild on every
+        // 1.5s tick when nothing changed.
+        let sig: String = {
+            switch layout {
+            case .closed:
+                let label = islandFoldedLabel(sessions: sessions.map { $0.s })
+                return "C|\(label.kind)|\(label.main)|\(label.sub)|\(activeCount(sessions.map { $0.s }))"
+            case .opened:
+                let rows = sessions.filter { $0.s.status != .idle }.prefix(IslandGeom.maxRows)
+                    .map { "\($0.s.id):\($0.s.status.rawValue):\($0.s.pendingTool ?? ""):\($0.tokens)" }
+                    .joined(separator: "|")
+                return "O|\(variant)|\(rows)"
+            }
+        }()
         if sig == lastSig { return }
         lastSig = sig
 
         inner?.removeFromSuperview()
-        // Force dark island theme regardless of system appearance — the
-        // island's whole point is to blend with the notch's black cutout.
-        let theme = Theme.dark
-        let v: NSView = state == .folded ? makeFolded(sessions, theme: theme)
-                                         : makeExpanded(sessions, theme: theme)
+        let v: NSView
+        switch layout {
+        case .closed:
+            v = makeFolded(sessions)
+        case .opened:
+            switch variant {
+            case .sessionList:           v = makeSessionList(sessions)
+            case .approval(let id):      v = makeApprovalCard(sessions, sessionId: id)
+            case .question(let id):      v = makeQuestionCard(sessions, sessionId: id)
+            case .completion(let id):    v = makeCompletionCard(sessions, sessionId: id)
+            }
+        }
         v.translatesAutoresizingMaskIntoConstraints = false
         addSubview(v)
-        // Inset content from the top by the notch height so it sits in the
-        // strip BELOW the notch — the notch overlaps the unbroken black halo.
         NSLayoutConstraint.activate([
             v.leadingAnchor.constraint(equalTo: leadingAnchor),
             v.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -346,8 +518,41 @@ final class IslandHostView: NSView {
         super.layout()
         if let bg = bgLayer {
             bg.frame = bounds
-            bg.cornerRadius = min(bounds.height / 2, 18)
+            // Closed folded pill: bottom-rounded with bottom radius = content/2.
+            // Expanded: 28pt bottom radius per §7.
+            switch currentLayout {
+            case .closed:
+                let r = IslandGeom.foldedH / 2 + 4
+                bg.cornerRadius = r
+                bg.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner,
+                                    .layerMinXMinYCorner, .layerMaxXMinYCorner]
+                // Use a path-based mask so only the bottom corners round.
+                applyAsymmetricMask(top: 0, bottom: r)
+            case .opened:
+                let r: CGFloat = 28
+                applyAsymmetricMask(top: 0, bottom: r)
+            }
         }
+    }
+
+    // Mask that keeps the top edge square (so the notch tucks in seamlessly)
+    // and rounds only the bottom corners.
+    private func applyAsymmetricMask(top: CGFloat, bottom: CGFloat) {
+        let path = CGMutablePath()
+        let b = bounds
+        path.move(to: CGPoint(x: b.minX, y: b.maxY))
+        path.addLine(to: CGPoint(x: b.maxX, y: b.maxY))
+        path.addLine(to: CGPoint(x: b.maxX, y: b.minY + bottom))
+        path.addArc(center: CGPoint(x: b.maxX - bottom, y: b.minY + bottom),
+                    radius: bottom, startAngle: 0, endAngle: -.pi / 2, clockwise: true)
+        path.addLine(to: CGPoint(x: b.minX + bottom, y: b.minY))
+        path.addArc(center: CGPoint(x: b.minX + bottom, y: b.minY + bottom),
+                    radius: bottom, startAngle: -.pi / 2, endAngle: .pi, clockwise: true)
+        path.closeSubpath()
+        _ = top
+        let mask = CAShapeLayer()
+        mask.path = path
+        bgLayer?.mask = mask
     }
 
     override func updateTrackingAreas() {
@@ -359,173 +564,737 @@ final class IslandHostView: NSView {
         addTrackingArea(t); tracking = t
     }
 
-    override func mouseEntered(with event: NSEvent) {
-        controller?.cancelCollapse()
-        controller?.setState(.expanded)
-    }
-    override func mouseExited(with event: NSEvent) {
-        // Stay open while a waiting session needs attention — the whole point
-        // of the expanded view is letting the user see what to approve.
-        if currentSessions.contains(where: { $0.s.status == .waiting }) { return }
-        controller?.scheduleCollapse()
-    }
+    override func mouseEntered(with event: NSEvent) { controller?.hoverEntered() }
+    override func mouseExited(with event: NSEvent)  { controller?.hoverExited() }
 
-    // -- Folded: dot + "N session(s)" or "idle" --
-    private func makeFolded(_ sessions: [SessionVM], theme: Theme) -> NSView {
-        let agg = aggregateStatus(sessions.map { $0.s })
-        let active = sessions.filter { $0.s.status != .idle }.count
+    // MARK: - Folded surface
 
-        // Dot — explicit layer-backed view, fixed 9pt circle.
-        let d: CGFloat = 9
-        let dotLayer = CALayer()
-        dotLayer.frame = NSRect(x: 0, y: 0, width: d, height: d)
-        dotLayer.cornerRadius = d / 2
-        dotLayer.backgroundColor = statusColor(agg).cgColor
-        let dotHost = NSView(frame: NSRect(x: 0, y: 0, width: d, height: d))
-        dotHost.wantsLayer = true
-        dotHost.layer?.addSublayer(dotLayer)
-        dotHost.translatesAutoresizingMaskIntoConstraints = false
-        dotHost.widthAnchor.constraint(equalToConstant: d).isActive = true
-        dotHost.heightAnchor.constraint(equalToConstant: d).isActive = true
+    private func makeFolded(_ sessions: [SessionVM]) -> NSView {
+        let label = islandFoldedLabel(sessions: sessions.map { $0.s })
+        let count = activeCount(sessions.map { $0.s })
 
-        // Text — plain labelWithString + explicit font/color. Attributed-string
-        // labels were silently failing to draw inside the folded view (the dot
-        // showed but the text didn't); a plain label renders reliably.
-        let str: String
-        if active == 0 {
-            str = "Claude · idle"
-        } else {
-            str = "Claude · \(active) " + (active == 1 ? "session" : "sessions")
+        let owl = makeOwl(for: label.kind, size: 24)
+        let countLabel = NSTextField(labelWithString: count > 0 ? "\(count)" : "")
+        countLabel.font = serif(19, .medium)
+        countLabel.textColor = IslandPalette.ink
+        countLabel.drawsBackground = false
+        countLabel.isBordered = false
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+        countLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        let mainColor: NSColor
+        switch label.kind {
+        case .waiting: mainColor = IslandPalette.accent
+        case .error:   mainColor = IslandPalette.red
+        case .running: mainColor = IslandPalette.ink
+        case .idle:    mainColor = IslandPalette.ink3
         }
-        let label = NSTextField(labelWithString: str)
-        label.font = ui(11.5, .medium)
-        label.textColor = active == 0 ? NSColor(white: 0.7, alpha: 1) : NSColor.white
-        label.drawsBackground = false
-        label.isBordered = false
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let mainLabel = NSTextField(labelWithString: label.main)
+        mainLabel.font = ui(11, label.kind == .idle ? .regular : .medium)
+        mainLabel.textColor = mainColor
+        mainLabel.lineBreakMode = .byTruncatingTail
+        mainLabel.drawsBackground = false; mainLabel.isBordered = false
+        mainLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        // Compose as an NSStackView with hugging-tight intrinsic width, then
-        // CENTER inside an explicit container view that fills the strip.
-        // Previously I returned the bare wrap and centered the stack inside
-        // it with only centerX/centerY constraints; the host gave the wrap a
-        // size via fill constraints, but the stack inside it had ambiguous
-        // width (centerX alone doesn't pin width) and AppKit collapsed the
-        // label's frame to 0 — invisible text. Pinning the stack's leading
-        // edge to a content-hug-driven width works, but plain "center in a
-        // sized container" with explicit non-fill stack constraints is
-        // simpler and more obviously correct.
-        let hs = NSStackView(views: [dotHost, label])
-        hs.orientation = .horizontal
-        hs.alignment = .centerY
-        hs.spacing = 8
-        hs.translatesAutoresizingMaskIntoConstraints = false
+        let subLabel = NSTextField(labelWithString: label.sub)
+        subLabel.font = ui(10.5)
+        subLabel.textColor = IslandPalette.ink2
+        subLabel.lineBreakMode = .byTruncatingTail
+        subLabel.drawsBackground = false; subLabel.isBordered = false
+        subLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let textStack = NSStackView(views: label.sub.isEmpty ? [mainLabel] : [mainLabel, subLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 1
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let pulse = PulseDot(color: IslandPalette.dotColor(for: label.kind), animate: label.kind != .idle)
+        pulse.translatesAutoresizingMaskIntoConstraints = false
+
+        // Idle: just owl + label (no count, no pulse), narrow.
+        let stack: NSStackView
+        if label.kind == .idle || count == 0 {
+            stack = NSStackView(views: [owl, textStack])
+            stack.spacing = 8
+        } else {
+            stack = NSStackView(views: [owl, countLabel, textStack, pulse])
+            stack.spacing = 8
+            stack.setCustomSpacing(6, after: owl)
+            stack.setCustomSpacing(10, after: countLabel)
+        }
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
 
         let wrap = NSView()
         wrap.wantsLayer = true
         wrap.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(hs)
-        // Center the stack; cap its top/bottom so it gets a real frame even
-        // when there's nothing else forcing a layout pass.
+        wrap.addSubview(stack)
         NSLayoutConstraint.activate([
-            hs.centerXAnchor.constraint(equalTo: wrap.centerXAnchor),
-            hs.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
-            hs.topAnchor.constraint(greaterThanOrEqualTo: wrap.topAnchor),
-            hs.bottomAnchor.constraint(lessThanOrEqualTo: wrap.bottomAnchor),
-            hs.leadingAnchor.constraint(greaterThanOrEqualTo: wrap.leadingAnchor, constant: 16),
-            hs.trailingAnchor.constraint(lessThanOrEqualTo: wrap.trailingAnchor, constant: -16),
+            stack.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -12),
+            stack.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
+            stack.topAnchor.constraint(greaterThanOrEqualTo: wrap.topAnchor, constant: 2),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: wrap.bottomAnchor, constant: -2),
         ])
         return wrap
     }
 
-    // -- Expanded: list of non-idle session rows --
-    private func makeExpanded(_ sessions: [SessionVM], theme: Theme) -> NSView {
-        let nonIdle = sessions.filter { $0.s.status != .idle }
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 1
-        stack.edgeInsets = NSEdgeInsets(top: IslandLayout.listVPad, left: 10,
-                                        bottom: IslandLayout.listVPad, right: 10)
-        stack.translatesAutoresizingMaskIntoConstraints = false
+    // MARK: - Expanded sessionList
 
-        if nonIdle.isEmpty {
-            let l = NSTextField(labelWithString: "No active sessions")
-            l.font = ui(11.5)
-            l.textColor = NSColor(white: 0.7, alpha: 1)
-            l.translatesAutoresizingMaskIntoConstraints = false
+    private func makeSessionList(_ sessions: [SessionVM]) -> NSView {
+        let nonIdle = sessions.filter { $0.s.status != .idle }
+        let waiting = nonIdle.filter { $0.s.status == .waiting }.count
+        let agg = aggregateStatus(sessions.map { $0.s })
+
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 0
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        // Head
+        let head = makeHead(label: islandFoldedLabel(sessions: sessions.map { $0.s }),
+                             count: nonIdle.count, cap: waiting > 0
+                                ? "active · \(waiting) awaiting"
+                                : "active session\(nonIdle.count == 1 ? "" : "s")")
+        root.addArrangedSubview(head)
+        head.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+
+        // Rows
+        let list = NSStackView()
+        list.orientation = .vertical
+        list.alignment = .leading
+        list.spacing = 1
+        list.translatesAutoresizingMaskIntoConstraints = false
+        list.edgeInsets = NSEdgeInsets(top: IslandGeom.listVPad, left: 6,
+                                        bottom: IslandGeom.listVPad, right: 6)
+
+        let visible = Array(nonIdle.prefix(IslandGeom.maxRows))
+        let overflowCount = nonIdle.count - visible.count
+
+        // Same-title disambiguation: if 2+ rows share a folder name, append
+        // the cwd's last segment to the sub line of each duplicate.
+        let folderCounts = Dictionary(grouping: visible, by: { $0.s.folder }).mapValues { $0.count }
+
+        for vm in visible {
+            let dup = (folderCounts[vm.s.folder] ?? 0) > 1
+            let row = makeListRow(vm, disambiguate: dup)
+            list.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -12).isActive = true
+        }
+        if overflowCount > 0 {
+            let more = makeOverflowRow(count: overflowCount)
+            list.addArrangedSubview(more)
+            more.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -12).isActive = true
+        }
+        if visible.isEmpty {
+            let empty = NSTextField(labelWithString: "No active sessions")
+            empty.font = ui(11.5)
+            empty.textColor = IslandPalette.ink3
+            empty.drawsBackground = false; empty.isBordered = false
+            empty.translatesAutoresizingMaskIntoConstraints = false
             let wrap = NSView()
             wrap.translatesAutoresizingMaskIntoConstraints = false
-            wrap.addSubview(l)
+            wrap.addSubview(empty)
             NSLayoutConstraint.activate([
-                l.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
-                l.centerXAnchor.constraint(equalTo: wrap.centerXAnchor),
+                empty.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
+                empty.centerXAnchor.constraint(equalTo: wrap.centerXAnchor),
+                wrap.heightAnchor.constraint(equalToConstant: IslandGeom.rowH),
             ])
-            stack.addArrangedSubview(wrap)
-            wrap.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20).isActive = true
-            wrap.heightAnchor.constraint(equalToConstant: IslandLayout.rowHeight).isActive = true
-            return stack
+            list.addArrangedSubview(wrap)
+            wrap.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -12).isActive = true
         }
+        root.addArrangedSubview(list)
+        list.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
 
-        for vm in nonIdle.prefix(6) {
-            let row = makeRow(vm, theme: theme)
-            stack.addArrangedSubview(row)
-            // Width is constrained AFTER addArrangedSubview so the row + stack
-            // share an ancestor; otherwise activate() throws "no common ancestor".
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20).isActive = true
+        // Footer hint
+        let foot = makeFooter(left: "Click a row to jump", right: "open popover")
+        root.addArrangedSubview(foot)
+        foot.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+
+        _ = agg
+        return root
+    }
+
+    private func makeListRow(_ vm: SessionVM, disambiguate: Bool) -> NSView {
+        let s = vm.s
+        let row = ClickRow()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.heightAnchor.constraint(equalToConstant: IslandGeom.rowH).isActive = true
+        row.onClick = { [weak self] in self?.controller?.onJump(s.pid, s.cwd, s.isDesktop) }
+
+        let kind: IslandLabelKind = {
+            switch s.status {
+            case .waiting: return .waiting
+            case .running: return .running
+            case .error:   return .error
+            case .idle:    return .idle
+            }
+        }()
+        let dot = staticDot(color: IslandPalette.dotColor(for: kind), diameter: 7,
+                             halo: IslandPalette.dotColor(for: kind).withAlphaComponent(0.18))
+
+        let title = NSTextField(labelWithString: s.folder)
+        title.font = serif(13.5, .medium)
+        title.textColor = IslandPalette.ink
+        title.lineBreakMode = .byTruncatingTail
+        title.drawsBackground = false; title.isBordered = false
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        // Sub line: `<b>tool</b> · sub` or `<b>state</b> · age`.
+        let sub = NSMutableAttributedString()
+        let boldAttrs: [NSAttributedString.Key: Any] = [
+            .font: ui(10.5, .medium), .foregroundColor: IslandPalette.ink2,
+        ]
+        let normalAttrs: [NSAttributedString.Key: Any] = [
+            .font: ui(10.5), .foregroundColor: IslandPalette.ink3,
+        ]
+        switch s.status {
+        case .waiting:
+            sub.append(NSAttributedString(string: s.pendingTool ?? "Awaiting", attributes: boldAttrs))
+            if let input = s.pendingInput, !input.isEmpty {
+                sub.append(NSAttributedString(string: " · " + islandTruncate(input, 32), attributes: normalAttrs))
+            }
+        case .running:
+            sub.append(NSAttributedString(string: "running", attributes: boldAttrs))
+            sub.append(NSAttributedString(string: " · " + relativeAge(s.updatedAt), attributes: normalAttrs))
+        case .error:
+            sub.append(NSAttributedString(string: (s.pendingTool ?? "tool") + " failed", attributes: boldAttrs))
+            if let e = s.lastError, !e.isEmpty {
+                sub.append(NSAttributedString(string: " · " + islandTruncate(e, 28), attributes: normalAttrs))
+            }
+        case .idle:
+            sub.append(NSAttributedString(string: "idle", attributes: normalAttrs))
         }
-        if nonIdle.count > 6 {
-            let l = NSTextField(labelWithString: "+\(nonIdle.count - 6) more — see popover")
-            l.font = ui(10)
-            l.textColor = NSColor(white: 0.55, alpha: 1)
-            l.translatesAutoresizingMaskIntoConstraints = false
-            stack.addArrangedSubview(l)
+        if disambiguate, !s.cwd.isEmpty {
+            let tail = (s.cwd as NSString).lastPathComponent
+            sub.append(NSAttributedString(string: "  …/\(tail)", attributes: [
+                .font: mono(9.5), .foregroundColor: IslandPalette.ink3,
+            ]))
         }
+        let subLabel = NSTextField(labelWithAttributedString: sub)
+        subLabel.lineBreakMode = .byTruncatingTail
+        subLabel.drawsBackground = false; subLabel.isBordered = false
+        subLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let info = NSStackView(views: [title, subLabel])
+        info.orientation = .vertical
+        info.alignment = .leading
+        info.spacing = 2
+        info.translatesAutoresizingMaskIntoConstraints = false
+
+        let tok = NSTextField(labelWithString: vm.tokens > 0 ? formatCount(vm.tokens) : "")
+        tok.font = mono(11)
+        tok.textColor = IslandPalette.ink3
+        tok.alignment = .right
+        tok.drawsBackground = false; tok.isBordered = false
+        tok.translatesAutoresizingMaskIntoConstraints = false
+        tok.setContentHuggingPriority(.required, for: .horizontal)
+
+        let stack = NSStackView(views: [dot, info, NSView(), tok])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: row.topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -6),
+        ])
+        return row
+    }
+
+    private func makeOverflowRow(count: Int) -> NSView {
+        let row = ClickRow()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.heightAnchor.constraint(equalToConstant: IslandGeom.rowH * 0.7).isActive = true
+        row.onClick = { [weak self] in self?.controller?.onOpenPopover() }
+        let l = NSTextField(labelWithString: "+\(count) more · open popover")
+        l.font = ui(11)
+        l.textColor = IslandPalette.ink3
+        l.alignment = .center
+        l.drawsBackground = false; l.isBordered = false
+        l.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(l)
+        NSLayoutConstraint.activate([
+            l.centerXAnchor.constraint(equalTo: row.centerXAnchor),
+            l.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+        ])
+        return row
+    }
+
+    // MARK: - Shared head / footer
+
+    private func makeHead(label: IslandLabel, count: Int, cap: String) -> NSView {
+        let owl = makeOwl(for: label.kind, size: 22)
+        let countLabel = NSTextField(labelWithString: "\(count)")
+        countLabel.font = serif(22, .medium)
+        countLabel.textColor = IslandPalette.ink
+        countLabel.drawsBackground = false; countLabel.isBordered = false
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+        countLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        let capLabel = makeCapLabel(cap)
+        let pulse = PulseDot(color: IslandPalette.dotColor(for: label.kind), animate: label.kind != .idle)
+        pulse.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [owl, countLabel, capLabel, NSView(), pulse])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let wrap = NSView()
+        wrap.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(stack)
+        // Faint divider below the head.
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = IslandPalette.border.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(divider)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -14),
+            stack.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 4),
+            stack.bottomAnchor.constraint(equalTo: divider.topAnchor, constant: -6),
+            divider.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 14),
+            divider.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -14),
+            divider.heightAnchor.constraint(equalToConstant: 0.5),
+            divider.bottomAnchor.constraint(equalTo: wrap.bottomAnchor),
+            wrap.heightAnchor.constraint(equalToConstant: IslandGeom.headH),
+        ])
+        return wrap
+    }
+
+    private func makeCapLabel(_ s: String) -> NSTextField {
+        let a = NSAttributedString(string: s.uppercased(), attributes: [
+            .font: ui(9.5, .semibold),
+            .foregroundColor: IslandPalette.ink3,
+            .kern: 1.4,
+        ])
+        let t = NSTextField(labelWithAttributedString: a)
+        t.drawsBackground = false; t.isBordered = false
+        t.translatesAutoresizingMaskIntoConstraints = false
+        return t
+    }
+
+    private func makeFooter(left: String, right: String) -> NSView {
+        let wrap = NSView()
+        wrap.translatesAutoresizingMaskIntoConstraints = false
+
+        let l = NSTextField(labelWithString: left)
+        l.font = ui(10.5); l.textColor = IslandPalette.ink3
+        l.drawsBackground = false; l.isBordered = false
+        l.translatesAutoresizingMaskIntoConstraints = false
+
+        let r = ClickRow()
+        r.onClick = { [weak self] in self?.controller?.onOpenPopover() }
+        let rLabel = NSTextField(labelWithString: right)
+        rLabel.font = ui(10.5); rLabel.textColor = IslandPalette.ink2
+        rLabel.drawsBackground = false; rLabel.isBordered = false
+        rLabel.translatesAutoresizingMaskIntoConstraints = false
+        r.translatesAutoresizingMaskIntoConstraints = false
+        r.addSubview(rLabel)
+        NSLayoutConstraint.activate([
+            rLabel.topAnchor.constraint(equalTo: r.topAnchor, constant: 2),
+            rLabel.bottomAnchor.constraint(equalTo: r.bottomAnchor, constant: -2),
+            rLabel.leadingAnchor.constraint(equalTo: r.leadingAnchor, constant: 4),
+            rLabel.trailingAnchor.constraint(equalTo: r.trailingAnchor, constant: -4),
+        ])
+
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = IslandPalette.border.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+
+        wrap.addSubview(divider)
+        wrap.addSubview(l)
+        wrap.addSubview(r)
+        NSLayoutConstraint.activate([
+            divider.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 14),
+            divider.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -14),
+            divider.heightAnchor.constraint(equalToConstant: 0.5),
+            divider.topAnchor.constraint(equalTo: wrap.topAnchor),
+            l.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 16),
+            l.centerYAnchor.constraint(equalTo: wrap.centerYAnchor, constant: 4),
+            r.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -14),
+            r.centerYAnchor.constraint(equalTo: wrap.centerYAnchor, constant: 4),
+            wrap.heightAnchor.constraint(equalToConstant: IslandGeom.footH),
+        ])
+        return wrap
+    }
+
+    // MARK: - Card variants
+
+    private func makeApprovalCard(_ sessions: [SessionVM], sessionId: String) -> NSView {
+        let s = session(sessions, id: sessionId) ?? sessions.first?.s ?? Session(id: "?", status: .waiting, updatedAt: 0)
+        let head = makeHead(label: IslandLabel(main: "Awaiting", sub: "", kind: .waiting),
+                             count: 1,
+                             cap: "permission · \(s.pendingTool ?? "tool")")
+        let q = NSMutableAttributedString()
+        q.append(NSAttributedString(string: "Approve ", attributes: [
+            .font: ui(13), .foregroundColor: IslandPalette.ink,
+        ]))
+        q.append(NSAttributedString(string: s.pendingTool ?? "tool", attributes: [
+            .font: ui(13, .semibold), .foregroundColor: IslandPalette.accent,
+        ]))
+        let body = makeCardBody(
+            metaLeft: s.title.isEmpty ? s.folder : s.title,
+            metaTag: prettyCwd(s.cwd),
+            question: q,
+            code: s.pendingInput,
+            opts: [],
+            duration: 12,
+            jump: { [weak self] in self?.controller?.onJump(s.pid, s.cwd, s.isDesktop) })
+        return wrapCard(head: head, body: body)
+    }
+
+    private func makeQuestionCard(_ sessions: [SessionVM], sessionId: String) -> NSView {
+        let s = session(sessions, id: sessionId) ?? sessions.first?.s ?? Session(id: "?", status: .waiting, updatedAt: 0)
+        let head = makeHead(label: IslandLabel(main: "Question", sub: "", kind: .waiting),
+                             count: 1, cap: "question · awaiting answer")
+        let q = NSMutableAttributedString(string: !s.title.isEmpty ? s.title : "Awaiting your answer",
+                                          attributes: [.font: ui(13), .foregroundColor: IslandPalette.ink])
+        let body = makeCardBody(
+            metaLeft: s.title.isEmpty ? s.folder : s.folder,
+            metaTag: prettyCwd(s.cwd),
+            question: q,
+            code: nil,
+            opts: [],
+            duration: 12,
+            jump: { [weak self] in self?.controller?.onJump(s.pid, s.cwd, s.isDesktop) })
+        return wrapCard(head: head, body: body)
+    }
+
+    private func makeCompletionCard(_ sessions: [SessionVM], sessionId: String) -> NSView {
+        let s = session(sessions, id: sessionId) ?? sessions.first?.s ?? Session(id: "?", status: .idle, updatedAt: 0)
+        let label = IslandLabel(main: "Done", sub: "", kind: .running)
+        let head = makeHead(label: label, count: 1, cap: "done · \(relativeAge(s.updatedAt))")
+        let q = NSMutableAttributedString(string: s.title.isEmpty ? s.folder : s.title,
+                                          attributes: [.font: ui(13), .foregroundColor: IslandPalette.ink])
+        let tokensVM = sessions.first(where: { $0.s.id == sessionId })?.tokens ?? 0
+        let body = makeCardBody(
+            metaLeft: s.folder,
+            metaTag: tokensVM > 0 ? "\(formatCount(tokensVM)) tokens" : prettyCwd(s.cwd),
+            question: q,
+            code: nil,
+            opts: [],
+            duration: 6,
+            jump: { [weak self] in self?.controller?.onJump(s.pid, s.cwd, s.isDesktop) },
+            tone: .done)
+        return wrapCard(head: head, body: body)
+    }
+
+    enum CardTone { case attention, done }
+
+    private func wrapCard(head: NSView, body: NSView) -> NSView {
+        let stack = NSStackView(views: [head, body])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        head.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        body.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return stack
     }
 
-    private func makeRow(_ vm: SessionVM, theme: Theme) -> NSView {
-        let s = vm.s
-        let row = HoverRow(theme: theme)
-        row.onClick = { [weak self] in self?.controller?.onJump(s.pid, s.cwd, s.isDesktop) }
-        let dot = DotView(status: s.status)
-        let name = NSTextField(labelWithString: s.folder)
-        name.font = {
-            let base = NSFont.systemFont(ofSize: 13, weight: .medium)
-            return base.fontDescriptor.withDesign(.serif).flatMap { NSFont(descriptor: $0, size: 13) } ?? base
-        }()
-        name.textColor = NSColor.white
-        name.lineBreakMode = .byTruncatingTail
-        name.translatesAutoresizingMaskIntoConstraints = false
-        let (statusText, attn) = statusLine(for: s)
-        let sub = NSTextField(labelWithString: statusText)
-        sub.font = ui(10.5)
-        sub.textColor = attn ? NSColor(hex: "E96945") : NSColor(white: 0.55, alpha: 1)
-        sub.lineBreakMode = .byTruncatingTail
-        sub.translatesAutoresizingMaskIntoConstraints = false
-        let info = NSStackView(views: [name, sub])
-        info.orientation = .vertical
-        info.alignment = .leading
-        info.spacing = 0
-        info.translatesAutoresizingMaskIntoConstraints = false
+    private func makeCardBody(metaLeft: String, metaTag: String,
+                              question: NSAttributedString, code: String?,
+                              opts: [String], duration: TimeInterval,
+                              jump: @escaping () -> Void,
+                              tone: CardTone = .attention) -> NSView {
+        let wrap = NSView()
+        wrap.translatesAutoresizingMaskIntoConstraints = false
+
+        // Meta row
+        let metaL = NSTextField(labelWithString: metaLeft)
+        metaL.font = ui(9.5, .semibold); metaL.textColor = IslandPalette.ink2
+        let metaR = NSTextField(labelWithString: metaTag)
+        metaR.font = mono(9.5); metaR.textColor = IslandPalette.ink3
+        for f in [metaL, metaR] {
+            f.drawsBackground = false; f.isBordered = false
+            f.translatesAutoresizingMaskIntoConstraints = false
+        }
+        let meta = NSStackView(views: [metaL, NSView(), metaR])
+        meta.orientation = .horizontal; meta.alignment = .firstBaseline
+        meta.translatesAutoresizingMaskIntoConstraints = false
+
+        // Question
+        let qLabel = NSTextField(labelWithAttributedString: question)
+        qLabel.lineBreakMode = .byTruncatingTail
+        qLabel.drawsBackground = false; qLabel.isBordered = false
+        qLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        var subviews: [NSView] = [meta, qLabel]
+
+        // Code block
+        if let code = code, !code.isEmpty {
+            let cv = NSTextField(labelWithString: islandTruncate(code, 90))
+            cv.font = mono(11)
+            cv.textColor = IslandPalette.ink
+            cv.lineBreakMode = .byTruncatingTail
+            cv.drawsBackground = true
+            cv.backgroundColor = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.06)
+            cv.isBordered = false
+            cv.translatesAutoresizingMaskIntoConstraints = false
+            cv.wantsLayer = true
+            cv.layer?.cornerRadius = 6
+            cv.layer?.borderWidth = 0.5
+            cv.layer?.borderColor = IslandPalette.border.cgColor
+            subviews.append(cv)
+        }
+
+        // Jump row
+        let jumpRow = ClickRow()
+        jumpRow.onClick = jump
+        jumpRow.translatesAutoresizingMaskIntoConstraints = false
         let arrow = NSTextField(labelWithString: "→")
-        arrow.font = ui(12)
-        arrow.textColor = NSColor(white: 0.55, alpha: 1)
-        arrow.translatesAutoresizingMaskIntoConstraints = false
-        let hs = NSStackView(views: [dot, info, NSView(), arrow])
-        hs.orientation = .horizontal
-        hs.alignment = .centerY
-        hs.spacing = 10
-        hs.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(hs)
+        let txt = NSTextField(labelWithString: "Jump to terminal to respond")
+        arrow.font = ui(12); arrow.textColor = IslandPalette.ink3
+        txt.font = ui(12, .medium); txt.textColor = IslandPalette.ink
+        for f in [arrow, txt] {
+            f.drawsBackground = false; f.isBordered = false
+            f.translatesAutoresizingMaskIntoConstraints = false
+        }
+        let jHStack = NSStackView(views: [arrow, txt, NSView()])
+        jHStack.orientation = .horizontal; jHStack.alignment = .centerY; jHStack.spacing = 10
+        jHStack.translatesAutoresizingMaskIntoConstraints = false
+        jumpRow.addSubview(jHStack)
         NSLayoutConstraint.activate([
-            hs.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 8),
-            hs.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -8),
-            hs.topAnchor.constraint(equalTo: row.topAnchor, constant: 5),
-            hs.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -5),
+            jHStack.leadingAnchor.constraint(equalTo: jumpRow.leadingAnchor, constant: 2),
+            jHStack.trailingAnchor.constraint(equalTo: jumpRow.trailingAnchor, constant: -2),
+            jHStack.topAnchor.constraint(equalTo: jumpRow.topAnchor, constant: 6),
+            jHStack.bottomAnchor.constraint(equalTo: jumpRow.bottomAnchor, constant: -6),
         ])
-        row.heightAnchor.constraint(equalToConstant: IslandLayout.rowHeight).isActive = true
-        return row
+        // Top divider above the jump row
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = IslandPalette.border.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+
+        let actions = NSStackView(views: [divider, jumpRow])
+        actions.orientation = .vertical; actions.alignment = .leading; actions.spacing = 4
+        actions.translatesAutoresizingMaskIntoConstraints = false
+        divider.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
+        divider.widthAnchor.constraint(equalTo: actions.widthAnchor).isActive = true
+        jumpRow.widthAnchor.constraint(equalTo: actions.widthAnchor).isActive = true
+        subviews.append(actions)
+
+        // Countdown progress bar
+        let progress = CountdownBar(duration: duration,
+                                     color: tone == .done ? IslandPalette.green : IslandPalette.ink3)
+        progress.translatesAutoresizingMaskIntoConstraints = false
+        subviews.append(progress)
+
+        let body = NSStackView(views: subviews)
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 7
+        body.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(body)
+        NSLayoutConstraint.activate([
+            body.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 16),
+            body.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -16),
+            body.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 10),
+            body.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -10),
+        ])
+        // Stretch the meta row, code block, jump row, and progress bar to full width.
+        for v in [meta, qLabel, jumpRow, progress, actions] {
+            v.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        }
+        return wrap
     }
+
+    // MARK: - Helpers
+
+    private func session(_ vms: [SessionVM], id: String) -> Session? {
+        vms.first(where: { $0.s.id == id })?.s
+    }
+
+    private func prettyCwd(_ cwd: String) -> String {
+        if cwd.isEmpty { return "" }
+        let abbr = (cwd as NSString).abbreviatingWithTildeInPath
+        return islandTruncate(abbr, 28)
+    }
+
+    private func makeOwl(for kind: IslandLabelKind, size: CGFloat) -> NSView {
+        let status: Status
+        switch kind {
+        case .running: status = .running
+        case .waiting: status = .waiting
+        case .error:   status = .error
+        case .idle:    status = .idle
+        }
+        // Use the project's owl image — face-changing per status.
+        let img = owlImage(for: status, diameter: size)
+        let iv = NSImageView(image: img)
+        iv.imageScaling = .scaleProportionallyUpOrDown
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        iv.widthAnchor.constraint(equalToConstant: size).isActive = true
+        iv.heightAnchor.constraint(equalToConstant: size).isActive = true
+        // Subtle rounded square clip to match the 100x100 rounded-square reference.
+        iv.wantsLayer = true
+        iv.layer?.cornerRadius = size * 0.225
+        iv.layer?.masksToBounds = true
+        return iv
+    }
+
+    private func staticDot(color: NSColor, diameter d: CGFloat, halo: NSColor) -> NSView {
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: d + 6, height: d + 6))
+        v.wantsLayer = true
+        let dot = CALayer()
+        dot.frame = NSRect(x: 3, y: 3, width: d, height: d)
+        dot.cornerRadius = d / 2
+        dot.backgroundColor = color.cgColor
+        let h = CALayer()
+        h.frame = NSRect(x: 0, y: 0, width: d + 6, height: d + 6)
+        h.cornerRadius = (d + 6) / 2
+        h.backgroundColor = halo.cgColor
+        v.layer?.addSublayer(h)
+        v.layer?.addSublayer(dot)
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.widthAnchor.constraint(equalToConstant: d + 6).isActive = true
+        v.heightAnchor.constraint(equalToConstant: d + 6).isActive = true
+        return v
+    }
+
+    private func serif(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        if let d = base.fontDescriptor.withDesign(.serif) {
+            return NSFont(descriptor: d, size: size) ?? base
+        }
+        return base
+    }
+}
+
+// MARK: - Reusable subviews
+
+// 7pt circle with a slowly-pulsing ring. Always layer-backed so it composites
+// cleanly on the black background.
+final class PulseDot: NSView {
+    let color: NSColor
+    let animate: Bool
+    init(color: NSColor, animate: Bool) {
+        self.color = color; self.animate = animate
+        super.init(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+        wantsLayer = true
+        layer = CALayer()
+        let d: CGFloat = 7
+        let inset: CGFloat = (16 - d) / 2
+        let core = CALayer()
+        core.frame = NSRect(x: inset, y: inset, width: d, height: d)
+        core.cornerRadius = d / 2
+        core.backgroundColor = color.cgColor
+        layer?.addSublayer(core)
+        widthAnchor.constraint(equalToConstant: 16).isActive = true
+        heightAnchor.constraint(equalToConstant: 16).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, animate, let layer = layer else { return }
+        if layer.sublayers?.contains(where: { $0.name == "ring" }) == true { return }
+        let ring = CAShapeLayer()
+        ring.name = "ring"
+        let d: CGFloat = 7
+        let inset: CGFloat = (16 - d) / 2
+        let r = NSRect(x: inset, y: inset, width: d, height: d).insetBy(dx: -2, dy: -2)
+        ring.path = CGPath(ellipseIn: r, transform: nil)
+        ring.fillColor = nil
+        ring.strokeColor = color.cgColor
+        ring.lineWidth = 1
+        ring.opacity = 0
+        ring.frame = bounds
+        ring.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        layer.addSublayer(ring)
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 0.6; scale.toValue = 1.5
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.8; fade.toValue = 0
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        group.duration = 1.6
+        group.repeatCount = .infinity
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        ring.add(group, forKey: "pulse")
+    }
+}
+
+// A thin horizontal bar that drains over `duration` seconds. Used as the card
+// countdown indicator.
+final class CountdownBar: NSView {
+    let duration: TimeInterval
+    let color: NSColor
+    private var fill: CALayer?
+    init(duration: TimeInterval, color: NSColor) {
+        self.duration = duration; self.color = color
+        super.init(frame: NSRect(x: 0, y: 0, width: 100, height: 1.5))
+        wantsLayer = true
+        layer = CALayer()
+        layer?.backgroundColor = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.08).cgColor
+        layer?.cornerRadius = 0.75
+        let f = CALayer()
+        f.backgroundColor = color.cgColor
+        f.cornerRadius = 0.75
+        layer?.addSublayer(f)
+        fill = f
+        heightAnchor.constraint(equalToConstant: 1.5).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        fill?.frame = bounds
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, let f = fill else { return }
+        f.removeAllAnimations()
+        f.frame = bounds
+        let anim = CABasicAnimation(keyPath: "transform.scale.x")
+        anim.fromValue = 1
+        anim.toValue = 0
+        anim.duration = duration
+        anim.fillMode = .forwards
+        anim.isRemovedOnCompletion = false
+        anim.timingFunction = CAMediaTimingFunction(name: .linear)
+        f.anchorPoint = CGPoint(x: 0, y: 0.5)
+        f.frame = bounds
+        f.add(anim, forKey: "drain")
+    }
+}
+
+// Plain hover-highlight clickable container.
+final class ClickRow: NSView {
+    var onClick: (() -> Void)?
+    private var tracking: NSTrackingArea?
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds,
+                               options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t); tracking = t
+    }
+    override func mouseEntered(with event: NSEvent) {
+        layer?.backgroundColor = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.04).cgColor
+    }
+    override func mouseExited(with event: NSEvent) {
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+    override func mouseUp(with event: NSEvent) { onClick?() }
 }

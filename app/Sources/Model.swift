@@ -368,14 +368,128 @@ func relativeAge(_ epoch: Double, now: Double = Date().timeIntervalSince1970) ->
 
 // Choose the single icon that represents all sessions.
 // error > waiting > running(live) > idle. Stale "running" decays to idle.
+// Errors decay to idle after `runningLivenessWindow` too (the dynamic island
+// spec calls out 90s for error transience — past the window, native recovery
+// wins).
 func aggregateStatus(_ sessions: [Session], now: Double = Date().timeIntervalSince1970) -> Status {
     var best: Status = .idle
     for s in sessions {
         let isRecent = now - s.updatedAt < runningLivenessWindow
-        let effective: Status = (s.status == .running && !isRecent) ? .idle : s.status
+        let errorRecent: Bool = (s.errorAt ?? s.updatedAt) > now - runningLivenessWindow
+        let effective: Status
+        switch s.status {
+        case .running: effective = isRecent ? .running : .idle
+        case .error:   effective = errorRecent ? .error : .idle
+        default:       effective = s.status
+        }
         if effective.priority > best.priority { best = effective }
     }
     return best
+}
+
+// Sessions whose live status counts as "non-idle" for the island's count badge.
+// Same rule as `aggregateStatus`: running must be recent; error must be within
+// its 90s window. (A session that's idle natively but carries an aged-out error
+// shouldn't pad the active count.)
+func activeCount(_ sessions: [Session], now: Double = Date().timeIntervalSince1970) -> Int {
+    sessions.reduce(0) { acc, s in
+        switch s.status {
+        case .idle: return acc
+        case .running: return acc + (now - s.updatedAt < runningLivenessWindow ? 1 : 0)
+        case .error:   return acc + ((s.errorAt ?? s.updatedAt) > now - runningLivenessWindow ? 1 : 0)
+        case .waiting: return acc + 1
+        }
+    }
+}
+
+// MARK: - Dynamic Island folded label
+//
+// Pure rendering helper for the island's folded state. Picks the single
+// highest-priority session and produces the (main, sub) text per the spec's
+// §3 template table:
+//
+//   error   → "Error · <tool>"     · sub = last_error (truncated)
+//   waiting → "Awaiting · <tool>"  · sub = pending_input (truncated)
+//   running → "Running · <title>"  · sub = last_event / cwd folder
+//   idle    → "Claude Dot"         · no sub
+//
+// The label's `kind` lets the view pick a color (accent for waiting, red for
+// error, ink for running, ink-3 for idle) without knowing the templates.
+
+enum IslandLabelKind { case idle, running, waiting, error }
+
+struct IslandLabel: Equatable {
+    var main: String
+    var sub: String
+    var kind: IslandLabelKind
+}
+
+// Truncate to `n` chars adding a single … (spec §7: main ≤ 12, sub ≤ 28).
+func islandTruncate(_ s: String, _ n: Int) -> String {
+    guard s.count > n else { return s }
+    let cut = s.index(s.startIndex, offsetBy: max(0, n - 1))
+    return String(s[..<cut]) + "…"
+}
+
+// Pick the session most worth showing in the folded label for the given
+// aggregate status. For error/waiting we pick the most recent of that class
+// (so the freshest signal wins). For running we pick the most recently
+// updated running session. Returns nil for idle.
+func islandFocusSession(_ sessions: [Session], aggregate: Status,
+                        now: Double = Date().timeIntervalSince1970) -> Session? {
+    switch aggregate {
+    case .idle: return nil
+    case .error:
+        return sessions
+            .filter { $0.status == .error && ($0.errorAt ?? $0.updatedAt) > now - runningLivenessWindow }
+            .max(by: { ($0.errorAt ?? $0.updatedAt) < ($1.errorAt ?? $1.updatedAt) })
+    case .waiting:
+        return sessions.filter { $0.status == .waiting }
+            .max(by: { $0.updatedAt < $1.updatedAt })
+    case .running:
+        return sessions.filter { $0.status == .running && now - $0.updatedAt < runningLivenessWindow }
+            .max(by: { $0.updatedAt < $1.updatedAt })
+    }
+}
+
+func islandFoldedLabel(sessions: [Session],
+                        now: Double = Date().timeIntervalSince1970) -> IslandLabel {
+    let agg = aggregateStatus(sessions, now: now)
+    guard let focus = islandFocusSession(sessions, aggregate: agg, now: now) else {
+        return IslandLabel(main: "Claude Dot", sub: "", kind: .idle)
+    }
+    switch agg {
+    case .idle:
+        return IslandLabel(main: "Claude Dot", sub: "", kind: .idle)
+    case .error:
+        let tool = focus.pendingTool ?? focus.lastEvent.components(separatedBy: " ").last ?? "—"
+        let main = "Error · " + islandTruncate(tool, 12)
+        let sub = islandTruncate(focus.lastError ?? focus.lastEvent, 28)
+        return IslandLabel(main: main, sub: sub, kind: .error)
+    case .waiting:
+        let tool = focus.pendingTool ?? "approval"
+        let main = "Awaiting · " + islandTruncate(tool, 12)
+        let sub = islandTruncate(focus.pendingInput ?? focus.title, 28)
+        return IslandLabel(main: main, sub: sub, kind: .waiting)
+    case .running:
+        let title = !focus.title.isEmpty ? focus.title : focus.folder
+        let main = "Running · " + islandTruncate(title, 14)
+        let sub: String = {
+            if !focus.lastEvent.isEmpty { return islandTruncate(focus.lastEvent, 28) }
+            return islandTruncate(focus.folder, 28)
+        }()
+        return IslandLabel(main: main, sub: sub, kind: .running)
+    }
+}
+
+// Variant the controller should auto-expand to for a given session. Maps the
+// session's status / pending tool to the §4 variant taxonomy. Useful both for
+// transition detection and for the snapshot renderer.
+enum IslandVariant: String { case sessionList, approval, question, completion }
+
+func islandVariantFor(pendingTool: String?) -> IslandVariant {
+    if let t = pendingTool, userBlockingTools.contains(t) { return .question }
+    return .approval
 }
 
 // MARK: - Usage / token helpers (pure, used by the popover's usage meter)

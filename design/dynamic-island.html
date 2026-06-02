@@ -1,0 +1,1444 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Dot — Dynamic Island Spec</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  /* ══════════════════════════════════════════════════════════════════════
+     Tokens — 继承自 design/DESIGN.md
+     灵动岛本体永远是纯黑（包住刘海制造视觉延伸），
+     页面背景 / 注解走 light / dark 主题。
+     ══════════════════════════════════════════════════════════════════════ */
+  [data-theme="light"]{
+    --canvas-a:#E4DECF; --canvas-b:#D2CCBD;
+    --surface:#F7F4EC; --raise:#FBFAF5;
+    --border:#E3DCCB; --border-soft:#EBE5D7;
+    --ink:#2B2A27; --ink-2:#6B6760; --ink-3:#9A968C;
+    --accent:#E96945; --accent-2:#D99A82;
+    --green:#6B8E5E; --red:#C7553D;
+    --shadow:0 12px 40px rgba(80,70,55,.18);
+  }
+  [data-theme="dark"]{
+    --canvas-a:#1f1e1b; --canvas-b:#141310;
+    --surface:#1f1f1e; --raise:#2e2c26;
+    --border:#3a382f; --border-soft:#322f29;
+    --ink:#ECE8DD; --ink-2:#A8A399; --ink-3:#6F6B61;
+    --accent:#E96945; --accent-2:#9C5238;
+    --green:#7A9B76; --red:#D27A66;
+    --shadow:0 20px 60px rgba(0,0,0,.6);
+  }
+
+  /* 岛内黑色调色板 —— 严格沿用 DESIGN.md token：
+     ✳ glyph + dot 用同一套色（accent / green / red / ink-3），
+     只是在纯黑底上略提亮以保持对比度。 */
+  :root{
+    --is-bg:#0A0A0A;                      /* 黑，贴合刘海 */
+    --is-ink:#ECE8DD;                     /* = --ink (dark theme) */
+    --is-ink-2:rgba(236,232,221,.62);     /* = --ink-2 */
+    --is-ink-3:rgba(236,232,221,.36);     /* = --ink-3 */
+    --is-border:rgba(236,232,221,.08);
+    --is-accent:#E96945;                  /* = --accent，与 popover .glyph 一致 */
+    --is-green:#7A9B76;                   /* = --green (dark)  */
+    --is-red:#D27A66;                     /* 红只在 error 时出现 */
+    --is-ring-run:rgba(168,163,153,.45);  /* = --ring-run (dark) */
+
+    /* 猫头鹰 mask —— 与菜单栏 owlImage() 同语义：宽头、两簇耳尖、两个大圆眼。
+       SVG 用 fill-rule="evenodd"，两个圆形子路径把眼睛挖空，纯 silhouette。
+       使用 -webkit-mask + mask 的方式套入 .spark；颜色由 background-color 决定。 */
+    --owl-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='black' fill-rule='evenodd'><path d='M4.4 3.6 Q4.6 1.4 5.7 3.7 Q7.7 2.6 10 2.6 Q12.3 2.6 14.3 3.7 Q15.4 1.4 15.6 3.6 Q17.6 5.5 17.6 10 Q17.6 17.4 10 17.6 Q2.4 17.4 2.4 10 Q2.4 5.5 4.4 3.6 Z M7.5 9 m-2 0 a2 2 0 1 0 4 0 a2 2 0 1 0 -4 0 Z M12.5 9 m-2 0 a2 2 0 1 0 4 0 a2 2 0 1 0 -4 0 Z M10 12.4 L9 13.8 L11 13.8 Z'/></svg>");
+  }
+
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased;}
+  html,body{height:100%;}
+  body{
+    font-family:"Newsreader",Georgia,serif;
+    background:var(--canvas-b);
+    background-image:radial-gradient(1100px 700px at 50% -8%, var(--canvas-a), var(--canvas-b) 70%);
+    color:var(--ink);min-height:100vh;
+    padding:28px 28px 80px;
+    transition:background-color .35s, color .35s;
+  }
+
+  /* ─── 主题开关 ────────────────────────────────────────────────────── */
+  .toggle{
+    position:fixed;top:18px;right:18px;display:flex;gap:2px;
+    background:rgba(255,255,255,.45);border:.5px solid var(--border);
+    border-radius:9px;padding:3px;backdrop-filter:blur(20px);
+    font-family:-apple-system,sans-serif;z-index:50;
+  }
+  [data-theme="dark"] .toggle{background:rgba(255,255,255,.05);}
+  .toggle button{
+    border:none;background:none;color:var(--ink-3);font-size:11px;
+    padding:5px 11px;border-radius:6px;cursor:pointer;letter-spacing:.2px;
+  }
+  .toggle button.on{background:var(--surface);color:var(--ink);}
+
+  /* ─── 文档头 ─────────────────────────────────────────────────────── */
+  .doc{max-width:980px;margin:0 auto;}
+  .doc-head{margin-bottom:34px;}
+  .doc-head .eyebrow{
+    font-family:-apple-system,sans-serif;font-size:10px;letter-spacing:1.8px;
+    text-transform:uppercase;color:var(--ink-3);margin-bottom:10px;
+  }
+  .doc-head h1{
+    font-weight:500;font-size:36px;letter-spacing:-.6px;line-height:1.1;
+  }
+  .doc-head h1 em{font-style:normal;color:var(--accent);}
+  .doc-head p{
+    margin-top:10px;color:var(--ink-2);font-size:15px;max-width:60ch;line-height:1.55;
+  }
+
+  /* ─── 区块通用 ───────────────────────────────────────────────────── */
+  section{margin-top:48px;}
+  section > h2{
+    font-family:-apple-system,sans-serif;font-size:10px;letter-spacing:1.8px;
+    text-transform:uppercase;color:var(--ink-3);margin-bottom:16px;
+    display:flex;align-items:center;gap:10px;
+  }
+  section > h2::after{
+    content:"";flex:1;height:.5px;background:var(--border-soft);
+  }
+
+  /* ─── 需求卡 ─────────────────────────────────────────────────────── */
+  .req-grid{
+    display:grid;grid-template-columns:repeat(3,1fr);gap:12px;
+  }
+  .req{
+    background:var(--surface);border:.5px solid var(--border);
+    border-radius:14px;padding:18px 18px 16px;
+  }
+  .req .k{
+    font-family:-apple-system,sans-serif;font-size:9.5px;
+    letter-spacing:1.5px;text-transform:uppercase;color:var(--ink-3);
+    margin-bottom:8px;
+  }
+  .req .v{font-size:17px;line-height:1.35;letter-spacing:-.2px;}
+  .req .v code{
+    font-family:"JetBrains Mono",monospace;font-size:13px;
+    background:var(--raise);padding:1px 5px;border-radius:4px;
+    border:.5px solid var(--border-soft);
+  }
+  .req .d{margin-top:8px;color:var(--ink-2);font-size:13.5px;line-height:1.5;}
+
+  /* ─── 优先级表 ───────────────────────────────────────────────────── */
+  .prio{
+    border:.5px solid var(--border);border-radius:14px;background:var(--surface);
+    overflow:hidden;
+  }
+  .prio-row{
+    display:grid;grid-template-columns:60px 110px 1fr 1fr;
+    align-items:center;padding:14px 18px;
+    border-bottom:.5px solid var(--border-soft);
+    font-size:14.5px;
+  }
+  .prio-row:last-child{border-bottom:0;}
+  .prio-row.h{
+    font-family:-apple-system,sans-serif;font-size:9.5px;letter-spacing:1.5px;
+    text-transform:uppercase;color:var(--ink-3);padding:10px 18px;
+  }
+  .prio-row .lvl{font-family:"JetBrains Mono",monospace;color:var(--ink-3);}
+  .prio-row .state{display:flex;align-items:center;gap:9px;font-weight:500;}
+  .prio-row .state .swatch{
+    width:9px;height:9px;border-radius:50%;
+  }
+  .prio-row code{
+    font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--ink-2);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════
+     灵动岛舞台
+     ══════════════════════════════════════════════════════════════════ */
+  .stage{
+    position:relative;
+    background:linear-gradient(180deg,#1a1815 0%, #232017 100%);
+    border-radius:18px;padding:0 0 36px;overflow:hidden;
+    border:.5px solid var(--border);
+    box-shadow:var(--shadow);
+    margin-bottom:18px;
+  }
+  [data-theme="dark"] .stage{
+    background:linear-gradient(180deg,#0e0d0b 0%, #161410 100%);
+  }
+  .stage .frame-bar{
+    height:30px;background:rgba(0,0,0,.35);
+    display:flex;align-items:center;padding:0 14px;gap:8px;
+    border-bottom:.5px solid rgba(255,255,255,.04);
+  }
+  .stage .frame-bar i{
+    width:11px;height:11px;border-radius:50%;display:block;
+    background:rgba(255,255,255,.18);
+  }
+  .stage .frame-bar i:nth-child(1){background:#ff5f57;}
+  .stage .frame-bar i:nth-child(2){background:#febc2e;}
+  .stage .frame-bar i:nth-child(3){background:#28c840;}
+  .stage .frame-bar .menubar-time{
+    margin-left:auto;color:rgba(255,255,255,.45);
+    font-family:-apple-system,sans-serif;font-size:11px;letter-spacing:.4px;
+  }
+
+  .menubar-strip{
+    position:relative;height:88px;
+    display:flex;align-items:flex-start;justify-content:center;
+    padding-top:0;
+    background:
+      radial-gradient(800px 200px at 50% 100%, rgba(255,255,255,.025), transparent 70%);
+  }
+  .stage-caption{
+    position:absolute;left:18px;top:14px;
+    font-family:-apple-system,sans-serif;font-size:10px;letter-spacing:1.5px;
+    text-transform:uppercase;color:rgba(255,255,255,.32);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════
+     灵动岛胶囊（折叠态）
+     - 上端贴齐屏幕顶部，宽度 250pt，高度 = 刘海高度 (≈ 32) + 24 内容条
+     - 圆角 = 内容条高 / 2，让左右两端与刘海下沿圆滑相切
+     ══════════════════════════════════════════════════════════════════ */
+  .island{
+    background:var(--is-bg);color:var(--is-fg);
+    border-radius:0 0 22px 22px;
+    width:250px;height:60px;
+    display:flex;align-items:flex-end;
+    padding:0 14px 8px;
+    font-family:"Newsreader",Georgia,serif;
+    box-shadow:0 6px 24px rgba(0,0,0,.45);
+    transition:width .28s cubic-bezier(.2,.8,.2,1),
+               height .28s cubic-bezier(.2,.8,.2,1),
+               border-radius .28s;
+    position:relative;cursor:default;overflow:hidden;
+  }
+  /* 模拟刘海的吸光感 — 顶部 32pt 是刘海占据区，不放内容 */
+  .island::before{
+    content:"";position:absolute;left:0;right:0;top:0;height:32px;
+    background:#000;pointer-events:none;
+  }
+
+  .row{
+    position:relative;z-index:1;display:flex;align-items:center;
+    gap:10px;width:100%;
+  }
+  /* stagger-in（沿用 popover 的 rise 关键帧） */
+  .row > *{opacity:0;animation:rise .4s cubic-bezier(.2,.7,.2,1) forwards;}
+  .row > *:nth-child(1){animation-delay:.04s;}
+  .row > *:nth-child(2){animation-delay:.08s;}
+  .row > *:nth-child(3){animation-delay:.12s;}
+  .row > *:nth-child(4){animation-delay:.16s;}
+  @keyframes rise{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
+
+  /* 左：猫头鹰主图标 —— 复用菜单栏 owlImage() 的形状，岛上用 SVG mask 实现
+     单色填充（颜色随状态切换）。形态：宽头 + 两侧耳簇 + 两个大圆眼（负空间挖空）。
+     在 popover 里复用同一个 .spark slot，HTML 内不带文字。 */
+  .spark{
+    display:inline-block;flex-shrink:0;
+    width:18px;height:18px;font-size:0;        /* 吞掉历史 ✳ 字符 */
+    background-color:var(--is-accent);
+    -webkit-mask: var(--owl-mask) center/contain no-repeat;
+            mask: var(--owl-mask) center/contain no-repeat;
+    transition:background-color .18s;
+  }
+  .spark.idle{background-color:var(--is-ink-3);}
+  .spark.err{background-color:var(--is-red);}
+
+  /* 中：count（serif，对齐 popover .head .mark）+ 状态文字 */
+  .count{
+    font-family:"Newsreader",Georgia,serif;
+    font-weight:500;font-size:19px;letter-spacing:-.3px;
+    line-height:1;color:var(--is-ink);
+    font-variant-numeric:tabular-nums;
+  }
+  .status-line{
+    display:flex;flex-direction:column;justify-content:center;
+    line-height:1.15;gap:1px;flex:1;min-width:0;
+  }
+  /* 主词：SF 11px 500 —— 对齐 popover .st */
+  .status-line .label{
+    font-family:-apple-system,"SF Pro Text",sans-serif;
+    font-size:11px;color:var(--is-ink);font-weight:500;letter-spacing:.1px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  /* 副词：SF 10.5px ink-2 —— 对齐 popover .st 次行 */
+  .status-line .sub{
+    font-family:-apple-system,"SF Pro Text",sans-serif;
+    font-size:10.5px;color:var(--is-ink-2);letter-spacing:.1px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  /* attn = waiting，按 popover .st.attn 用 accent */
+  .status-line .label.attn{color:var(--is-accent);}
+  .status-line .label.err{color:var(--is-red);}
+  /* running 主词保持中性 ink —— popover 里也是 ink-2 配 spinner，不是绿色 */
+
+  /* 右：状态点 —— 完全沿用 popover .dot 的语义
+     run = ink-3 灰 + 灰色脉冲环 · wait = accent + accent 脉冲环 · err = red + red 脉冲环 */
+  .pulse{
+    width:7px;height:7px;border-radius:50%;flex-shrink:0;
+    margin-left:auto;position:relative;
+  }
+  .pulse.run{background:var(--is-ink-3);}
+  .pulse.run::after{
+    content:"";position:absolute;inset:-4px;border-radius:50%;
+    border:1px solid var(--is-ring-run);
+    animation:ring 1.8s ease-out infinite;
+  }
+  .pulse.wait{background:var(--is-accent);}
+  .pulse.wait::after{
+    content:"";position:absolute;inset:-4px;border-radius:50%;
+    border:1px solid var(--is-accent);opacity:.5;
+    animation:ring 1.5s ease-out infinite;
+  }
+  .pulse.err{background:var(--is-red);}
+  .pulse.err::after{
+    content:"";position:absolute;inset:-4px;border-radius:50%;
+    border:1px solid var(--is-red);opacity:.5;
+    animation:ring 1.5s ease-out infinite;
+  }
+  .pulse.idle{background:rgba(236,232,221,.18);}
+  @keyframes ring{
+    0%{transform:scale(.6);opacity:.8;}
+    100%{transform:scale(1.5);opacity:0;}
+  }
+
+  /* idle 态 — 收窄；文字与 ✳ 都降到 ink-3 */
+  .island.idle{width:140px;}
+  .island.idle .status-line .label{color:var(--is-ink-3);font-weight:400;}
+
+  /* ══════════════════════════════════════════════════════════════════
+     展开态（hover / 长按）
+     ══════════════════════════════════════════════════════════════════ */
+  .island.expanded{
+    width:420px;height:auto;min-height:60px;
+    border-radius:0 0 28px 28px;
+    align-items:stretch;flex-direction:column;padding:0 0 10px;
+  }
+  .island.expanded::before{height:32px;}
+  .island.expanded .row{padding:0 16px 10px;}
+  .island.expanded .head{
+    padding:34px 16px 10px;display:flex;align-items:center;gap:10px;
+    border-bottom:.5px solid var(--is-divider);
+  }
+  .island.expanded .head .count{font-size:22px;}
+  /* 与 popover 的 .cap 同源：9px 大写 letterspaced 小标 */
+  .island.expanded .cap-lbl{
+    font-family:-apple-system,"SF Pro Text",sans-serif;
+    font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;
+    color:var(--is-ink-3);
+  }
+  .island.expanded .head .pulse{margin-left:auto;}
+
+  .ss-list{padding:8px 6px 4px;display:flex;flex-direction:column;gap:1px;}
+  .ss{
+    display:grid;grid-template-columns:14px 1fr auto;align-items:center;
+    gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;
+    transition:background .12s;
+  }
+  .ss:hover{background:rgba(255,255,255,.04);}
+  .ss .dot{width:7px;height:7px;border-radius:50%;justify-self:center;}
+  .ss .dot.wait{background:var(--is-accent);box-shadow:0 0 0 3px rgba(255,122,85,.18);}
+  .ss .dot.run{background:var(--is-green);box-shadow:0 0 0 3px rgba(156,193,143,.18);}
+  .ss .dot.err{background:var(--is-red);box-shadow:0 0 0 3px rgba(255,111,111,.18);}
+  .ss .dot.done{background:var(--is-fg-3);}
+  .ss .meta{min-width:0;}
+  .ss .title{
+    font-size:13.5px;color:var(--is-fg);font-weight:500;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.15;
+  }
+  .ss .sub{
+    font-family:-apple-system,sans-serif;font-size:10.5px;
+    color:var(--is-fg-3);letter-spacing:.1px;margin-top:2px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .ss .sub b{color:var(--is-fg-2);font-weight:500;}
+  .ss .tok{
+    font-family:"JetBrains Mono",monospace;font-size:11px;
+    color:var(--is-fg-3);font-variant-numeric:tabular-nums;
+  }
+
+  .ss-foot{
+    margin:6px 14px 4px;padding-top:8px;border-top:.5px solid var(--is-divider);
+    display:flex;align-items:center;justify-content:space-between;
+    font-family:-apple-system,sans-serif;font-size:10.5px;
+    color:var(--is-ink-3);letter-spacing:.2px;
+  }
+  .ss-foot .kbd{
+    font-family:"JetBrains Mono",monospace;
+    border:.5px solid rgba(236,232,221,.14);border-radius:4px;
+    padding:1px 5px;color:var(--is-ink-2);font-size:10px;
+  }
+
+  /* ─── 事件驱动卡片：approval / question / completion ───────────────
+     对齐 popover .ask / 完成态视觉；岛上版本只保留单一动作 → 跳转回应 */
+  .card{
+    padding:8px 16px 12px;display:flex;flex-direction:column;gap:6px;
+    position:relative;z-index:1;
+  }
+  .card .meta-row{
+    display:flex;align-items:center;gap:8px;
+    font-family:-apple-system,"SF Pro Text",sans-serif;
+    font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;
+    color:var(--is-ink-3);
+  }
+  .card .meta-row .tool{color:var(--is-ink-2);}
+  .card .meta-row .tag{
+    margin-left:auto;font-family:"JetBrains Mono",monospace;
+    color:var(--is-ink-3);font-size:9.5px;letter-spacing:.3px;
+  }
+  .card .q{
+    font-family:-apple-system,"SF Pro Text",sans-serif;
+    font-size:13px;color:var(--is-ink);line-height:1.4;
+  }
+  .card .q b{color:var(--is-accent);font-weight:500;}
+  .card .code{
+    font-family:"JetBrains Mono",monospace;font-size:11px;
+    background:rgba(236,232,221,.06);
+    border:.5px solid rgba(236,232,221,.10);
+    border-radius:6px;padding:6px 9px;
+    color:var(--is-ink);word-break:break-all;line-height:1.4;
+  }
+  .card .opts{
+    display:flex;flex-direction:column;gap:0;
+    border-top:.5px solid var(--is-border);margin-top:4px;
+  }
+  .card .opt{
+    display:flex;align-items:center;gap:9px;padding:7px 2px;
+    border-bottom:.5px solid var(--is-border);
+    font-family:-apple-system,"SF Pro Text",sans-serif;font-size:12px;
+    color:var(--is-ink-2);cursor:pointer;transition:padding-left .12s, color .12s;
+  }
+  .card .opt:last-child{border-bottom:0;}
+  .card .opt:hover{padding-left:6px;color:var(--is-ink);}
+  .card .opt .k{
+    font-family:"JetBrains Mono",monospace;font-size:9.5px;
+    color:var(--is-ink-3);width:10px;flex-shrink:0;
+  }
+  .card .opt.go{color:var(--is-ink);font-weight:500;}
+  .card .opt.go:hover{color:var(--is-accent);}
+  .card .progress{
+    height:1.5px;background:rgba(236,232,221,.08);border-radius:1px;
+    overflow:hidden;margin-top:2px;
+  }
+  .card .progress i{
+    display:block;height:100%;background:var(--is-ink-3);
+    animation:countdown var(--cd, 12s) linear forwards;
+  }
+  @keyframes countdown{from{width:100%;}to{width:0;}}
+
+  /* 完成态用绿色辅助色（与 popover .dot.done 同语义） */
+  .card.completion .meta-row .ok{color:var(--is-green);}
+  .card.completion .progress i{background:var(--is-green);}
+
+  /* ─── 各态卡 ────────────────────────────────────────────────────── */
+  .state-grid{
+    display:grid;grid-template-columns:repeat(2,1fr);gap:18px;
+  }
+  .state-card .meta{
+    margin-top:14px;display:flex;align-items:baseline;justify-content:space-between;gap:14px;
+  }
+  .state-card .meta h3{
+    font-weight:500;font-size:18px;letter-spacing:-.2px;
+  }
+  .state-card .meta p{
+    color:var(--ink-2);font-size:13px;line-height:1.5;max-width:42ch;
+  }
+  .state-card .tag{
+    font-family:-apple-system,sans-serif;font-size:9.5px;letter-spacing:1.5px;
+    text-transform:uppercase;color:var(--ink-3);
+    border:.5px solid var(--border);border-radius:999px;padding:3px 8px;
+    white-space:nowrap;
+  }
+
+  /* ─── 标注 ───────────────────────────────────────────────────────── */
+  .anno{
+    margin-top:14px;background:var(--surface);border:.5px solid var(--border);
+    border-radius:14px;padding:14px 18px;
+    font-size:13px;color:var(--ink-2);line-height:1.55;
+  }
+  .anno code{
+    font-family:"JetBrains Mono",monospace;font-size:12.5px;
+    background:var(--raise);padding:1px 5px;border-radius:4px;
+    border:.5px solid var(--border-soft);color:var(--ink);
+  }
+  .anno ul{margin:6px 0 0 18px;}
+  .anno li{margin:2px 0;}
+
+  /* ─── 交互行为表 ─────────────────────────────────────────────────── */
+  .behave{
+    border:.5px solid var(--border);border-radius:14px;background:var(--surface);
+    overflow:hidden;
+  }
+  .behave-row{
+    display:grid;grid-template-columns:140px 1fr;align-items:flex-start;
+    padding:13px 18px;border-bottom:.5px solid var(--border-soft);
+    font-size:14px;line-height:1.55;
+  }
+  .behave-row:last-child{border-bottom:0;}
+  .behave-row .k{
+    font-family:-apple-system,sans-serif;font-size:11px;
+    color:var(--ink-3);letter-spacing:.4px;text-transform:uppercase;
+    padding-top:1px;
+  }
+  .behave-row .v{color:var(--ink-2);}
+  .behave-row .v b{color:var(--ink);font-weight:500;}
+
+  footer{
+    margin-top:60px;padding-top:24px;border-top:.5px solid var(--border-soft);
+    font-family:-apple-system,sans-serif;font-size:11px;color:var(--ink-3);
+    letter-spacing:.3px;display:flex;justify-content:space-between;
+  }
+</style>
+</head>
+<body>
+
+<!-- Theme toggle -->
+<div class="toggle" role="tablist">
+  <button class="on" data-set="light">Light</button>
+  <button data-set="dark">Dark</button>
+</div>
+
+<div class="doc">
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <header class="doc-head">
+    <div class="eyebrow">Claude Dot · Requirements v0.3 · 2026-06-02</div>
+    <h1>The <em>Dynamic Island</em> for Claude Code sessions</h1>
+    <p>
+      把菜单栏猫头鹰的「聚合状态」搬到 MacBook 刘海周围，
+      形成一个常驻可见的环境层。折叠态只显示三件事：
+      <b>图标 · 数字 · 优先级最高的状态文字</b>；悬停展开为非空闲会话列表。
+      所有视觉沿用 <code>design/DESIGN.md</code>，岛体始终为纯黑以与刘海无缝衔接。
+    </p>
+  </header>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- §0 概述与目标 -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>0 · 背景 · 目标 · 非目标</h2>
+    <div class="anno" style="margin-top:0;">
+      <p style="margin:0 0 8px;"><b>背景。</b>
+        当前 Claude Dot 通过菜单栏 owl glyph 暴露聚合状态，需要点击展开 popover 才能看到细节。
+        对于「同时跑多个 session」的重度用户，菜单栏图标信息密度太低 ——
+        看不到 <code>activeCount</code>、看不到正在等待的工具、看不到错误摘要。
+      </p>
+      <p style="margin:0 0 8px;"><b>目标。</b></p>
+      <ul style="margin-top:0;">
+        <li><b>常驻可见</b>：无需点击即可获知活跃会话数与最高优先级状态。</li>
+        <li><b>零干扰</b>：idle 时退化为「刘海延伸」，不抢视觉焦点。</li>
+        <li><b>一跳直达</b>：展开后点击行直接 jump 到会话所在终端。</li>
+        <li><b>零新数据源</b>：复用 popover 已有的 <code>SessionVM</code> 与 <code>refresh()</code> tick。</li>
+        <li><b>视觉一致</b>：与 popover、菜单栏 owl 同色、同节拍、同 priority 函数。</li>
+      </ul>
+      <p style="margin:8px 0 0;"><b>非目标。</b></p>
+      <ul style="margin-top:0;">
+        <li><b>不在岛上代答</b>权限审批：approvalCard <i>渲染</i>请求 + 提供 jump，
+            真正的 yes/no 仍在终端键入（Claude Code 的 permission prompt 是终端 UI，岛体不远端代答）。</li>
+        <li>不展示 token 用量百分比、subscription limit ——
+            那是 popover 的英雄区域，岛上不重复。</li>
+        <li>不替代菜单栏 owl —— 两者并存，受控于独立开关。</li>
+        <li>不支持外接显示器复制岛体 —— 仅显示在内建屏。</li>
+        <li>不引入网络栈（不做 Watch / Bonjour / SSE 等，留给独立模块）。</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- §1 用户故事 -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>1 · 用户故事</h2>
+    <div class="prio">
+      <div class="prio-row h">
+        <div>ID</div><div>角色</div><div>故事</div><div>验收线索</div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">US-1</div>
+        <div class="state">heavy user</div>
+        <div>我同时跑 3 个 Claude session，希望<b>无需点击</b>就知道几个在跑、几个等输入。</div>
+        <div><code>folded 态 count + label 即时反映</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">US-2</div>
+        <div class="state">focused user</div>
+        <div>我写代码时一个 session 弹出 Bash 审批，希望能<b>第一眼看到</b>是哪个工具卡住了。</div>
+        <div><code>waiting → accent + pending_tool</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">US-3</div>
+        <div class="state">multitasker</div>
+        <div>我有 5 个 session，希望 hover 岛体能<b>列出</b>非 idle 的，一击跳过去回应。</div>
+        <div><code>expanded list + jump(pid:cwd:)</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">US-4</div>
+        <div class="state">solo user</div>
+        <div>我目前没在跑任何 session，希望岛<b>几乎不存在</b>，不要在编辑器上方分散注意力。</div>
+        <div><code>idle → 140pt 收窄, 36% 不透明</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">US-5</div>
+        <div class="state">presenter</div>
+        <div>我在投屏 / 看视频全屏时，希望岛<b>自动让位</b>，不要遮住内容。</div>
+        <div><code>menuBarVisible == false → orderOut</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">US-6</div>
+        <div class="state">non-notch user</div>
+        <div>我在 M1 Air 上没有刘海，希望该特性<b>不破相</b>，要么隐藏要么优雅退化。</div>
+        <div><code>safeAreaInsets.top == 0 → 菜单栏下胶囊</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">US-7</div>
+        <div class="state">privacy-aware</div>
+        <div>我不想要这个特性，希望能<b>一键关闭</b>且偏好持久化。</div>
+        <div><code>popover footer 开关 + UserDefaults</code></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- §2 折叠态三要素 (原 §1) -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>2 · 功能需求 · 折叠态三要素</h2>
+    <div class="req-grid">
+      <div class="req">
+        <div class="k">Icon</div>
+        <div class="v">猫头鹰 silhouette</div>
+        <div class="d">
+          复用菜单栏 <code>owlImage()</code> 矢量路径，
+          18×18 单色 silhouette；默认 <code>--accent</code> 赤陶，
+          idle → <code>--ink-3</code>，error → <code>--red</code>，completion → <code>--green</code>。
+          状态色仍由右侧 <code>.dot</code> 承担，主图标保留品牌识别。
+        </div>
+      </div>
+      <div class="req">
+        <div class="k">Number</div>
+        <div class="v"><code>activeCount</code></div>
+        <div class="d">
+          非 idle 会话总数（<code>running + waiting + error</code>）。
+          0 时折叠态收窄并隐去数字，仅留 glyph，避免噪音。
+        </div>
+      </div>
+      <div class="req">
+        <div class="k">Status text</div>
+        <div class="v">优先级最高的一行</div>
+        <div class="d">
+          按 <code>error &gt; waiting &gt; running &gt; idle</code> 取最高级，
+          展示该级别下最具信息量的一句（见 §2）。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- 2. 状态文案优先级 -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>3 · 功能需求 · 状态优先级与文案模板</h2>
+    <div class="prio">
+      <div class="prio-row h">
+        <div>Level</div><div>State</div><div>Folded label</div><div>Source</div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">3</div>
+        <div class="state"><span class="swatch" style="background:#D27A66"></span>error</div>
+        <div>主词 <b>“Error · &lt;tool&gt;”</b> (red) · 副词 <code>last_error</code></div>
+        <div><code>hook.last_error</code> · 90s 衰减</div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">2</div>
+        <div class="state"><span class="swatch" style="background:#E96945"></span>waiting</div>
+        <div>主词 <b>“Awaiting · &lt;pending_tool&gt;”</b> (accent) · 副词 <code>pending_input</code></div>
+        <div><code>hook.pending_tool</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">1</div>
+        <div class="state"><span class="swatch" style="background:#9A968C"></span>running</div>
+        <div>主词 <b>“Running · &lt;title&gt;”</b> (ink) · 副词 当前工具或 cwd</div>
+        <div><code>native.busy</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">0</div>
+        <div class="state"><span class="swatch" style="background:#6F6B61"></span>idle</div>
+        <div>仅 ✳ + “Claude Dot”，<code>--ink-3</code></div>
+        <div><code>—</code></div>
+      </div>
+    </div>
+    <div class="anno">
+      <b>聚合规则：</b>取所有会话状态的最大值（max-priority），
+      与菜单栏猫头鹰使用同一函数 <code>aggregateStatus()</code>。
+      <ul>
+        <li><b>error</b> 文案只在 <code>runningLivenessWindow = 90s</code> 内有效，过期回落。</li>
+        <li>当 <code>waiting/running</code> 数 ≥ 2 时，副文案显示<i>最近活跃</i>会话标题；
+            只有 1 个会话时直接展示该会话的 <code>title</code> 或 <code>pending_tool</code>。</li>
+        <li>idle 态 0 会话时建议把岛宽收到 140pt，避免长期占据视觉。</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- §4 表面状态模型（参考 open-vibe-island/docs/notch-surface-model.md） -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>4 · 表面状态模型（Layout × Variant）</h2>
+    <div class="anno" style="margin-top:0;">
+      <p style="margin:0 0 8px;">
+        岛体不是「折叠 ⇄ 展开」一个维度，而是
+        <b>布局（layout）× 变体（variant）</b>两个正交维度。
+        §3 的优先级链只决定 <code>closed</code> 折叠态的<i>文案</i>；
+        <code>opened</code> 展开态根据事件类型路由到不同变体。
+      </p>
+    </div>
+
+    <div class="prio" style="margin-bottom:14px;">
+      <div class="prio-row h">
+        <div>Layout</div><div>Variant</div><div>用途</div><div>触发</div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">closed</div>
+        <div class="state">—</div>
+        <div>常驻折叠态，仅显示 ✳ + count + 最高优先级文案</div>
+        <div><code>默认</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">opened</div>
+        <div class="state">sessionList</div>
+        <div>非 idle 会话列表，可点击 jump</div>
+        <div><code>用户 hover / click</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">opened</div>
+        <div class="state">approvalCard</div>
+        <div>权限请求卡片：工具 + 命令/URL + 「跳转回应」</div>
+        <div><code>hook.PreToolUse</code> 触发</div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">opened</div>
+        <div class="state">questionCard</div>
+        <div>提问卡片：问题 + 选项预览 + 「跳转回应」</div>
+        <div><code>hook.UserPromptSubmit/Notification</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">opened</div>
+        <div class="state">completionCard</div>
+        <div>完成提醒：任务摘要 + 「Dismiss / 跳转查看」</div>
+        <div><code>hook.Stop</code> 触发</div>
+      </div>
+    </div>
+    <div class="anno">
+      <b>路由规则。</b>
+      <ul>
+        <li><b>manual click / hover</b> → <code>opened + sessionList</code></li>
+        <li><b>permissionRequested 事件</b> → <code>opened + approvalCard</code>（auto-expand）</li>
+        <li><b>questionAsked 事件</b> → <code>opened + questionCard</code>（auto-expand）</li>
+        <li><b>sessionCompleted 事件</b> → <code>opened + completionCard</code>（auto-expand）</li>
+      </ul>
+      <b>auto-expand 卡片是临时表面：</b>
+      <ul>
+        <li>超时自动折回（approvalCard 12s / questionCard 12s / completionCard 6s）</li>
+        <li>指针进入卡片后再离开，立即折回（即「看一眼就走」的语义）</li>
+        <li><b>不</b>把这些动作以 inline 形式塞进 sessionList —— 它们用独立通知表面，保证列表只负责导航</li>
+      </ul>
+      <b>为什么这样拆？</b>
+      sessionList 是「主动浏览」入口（用户在掌控）；卡片是「被动响应」入口（事件在掌控）。
+      把它们混在一起，会让用户每次 hover 都看到陌生卡片，反而成为干扰。
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- §5 视觉态总览（原 §4） -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>5 · 视觉态总览</h2>
+
+    <!-- IDLE -->
+    <div class="stage">
+      <div class="frame-bar"><i></i><i></i><i></i><span class="menubar-time">14:02</span></div>
+      <div class="menubar-strip">
+        <div class="stage-caption">idle · 0 sessions</div>
+        <div class="island idle">
+          <div class="row">
+            <span class="spark idle">✳</span>
+            <div class="status-line">
+              <span class="label">Claude&nbsp;Dot</span>
+            </div>
+            <span class="pulse idle"></span>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="meta" style="padding:0 22px;">
+          <div>
+            <h3>Idle — 静默常驻</h3>
+            <p>没有活跃会话时收窄到 140pt，只剩猫头鹰；文字色降到 36% 透明度，肉眼几乎只是黑色刘海的延伸。</p>
+          </div>
+          <span class="tag">level 0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RUNNING -->
+    <div class="stage">
+      <div class="frame-bar"><i></i><i></i><i></i><span class="menubar-time">14:18</span></div>
+      <div class="menubar-strip">
+        <div class="stage-caption">running · 2 sessions</div>
+        <div class="island">
+          <div class="row">
+            <span class="spark">✳</span>
+            <span class="count">2</span>
+            <div class="status-line">
+              <span class="label">Running · refactor-status</span>
+              <span class="sub">Bash · npm run build</span>
+            </div>
+            <span class="pulse run"></span>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="meta" style="padding:0 22px;">
+          <div>
+            <h3>Running — 绿点 + 脉冲环</h3>
+            <p>主文字 “running” 用 <code>--green</code>，副文字给最近活跃会话标题；右侧绿色脉冲环 1.6s 循环，与 popover 行内的 <code>DotView</code> 同节拍。</p>
+          </div>
+          <span class="tag">level 1</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- WAITING -->
+    <div class="stage">
+      <div class="frame-bar"><i></i><i></i><i></i><span class="menubar-time">14:33</span></div>
+      <div class="menubar-strip">
+        <div class="stage-caption">waiting · needs input</div>
+        <div class="island">
+          <div class="row">
+            <span class="spark">✳</span>
+            <span class="count">1</span>
+            <div class="status-line">
+              <span class="label attn">Awaiting · Bash</span>
+              <span class="sub">npm test --watch</span>
+            </div>
+            <span class="pulse wait"></span>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="meta" style="padding:0 22px;">
+          <div>
+            <h3>Waiting — 唯一会调用赤陶 accent 的态</h3>
+            <p>主文字 “needs input” 用 <code>--accent</code>，副文字 = <code>pending_tool · pending_input</code>。
+              这是岛体能调用的最强视觉，配合脉冲环把它当作「呼叫信号」。</p>
+          </div>
+          <span class="tag">level 2 · accent</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ERROR -->
+    <div class="stage">
+      <div class="frame-bar"><i></i><i></i><i></i><span class="menubar-time">14:41</span></div>
+      <div class="menubar-strip">
+        <div class="stage-caption">error</div>
+        <div class="island">
+          <div class="row">
+            <span class="spark err">✳</span>
+            <span class="count">1</span>
+            <div class="status-line">
+              <span class="label err">Error · Edit</span>
+              <span class="sub">settings.swift · permission denied</span>
+            </div>
+            <span class="pulse err"></span>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="meta" style="padding:0 22px;">
+          <div>
+            <h3>Error — 90s 衰减窗</h3>
+            <p>红色态优先级最高，但仅在 <code>error_at</code> 距今 ≤ 90s 内显示；之后由 native registry 接管回落。
+              副文字 = <code>last_error</code> 截断版（最多 28 字符）。</p>
+          </div>
+          <span class="tag">level 3 · transient</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- EXPANDED -->
+    <div class="stage">
+      <div class="frame-bar"><i></i><i></i><i></i><span class="menubar-time">14:57</span></div>
+      <div class="menubar-strip" style="height:300px;">
+        <div class="stage-caption">expanded · hover / long-press</div>
+        <div class="island expanded">
+          <div class="head">
+            <span class="spark">✳</span>
+            <span class="count">3</span>
+            <span class="cap-lbl">active · 1 awaiting</span>
+            <span class="pulse wait"></span>
+          </div>
+          <div class="ss-list">
+            <div class="ss">
+              <span class="dot wait"></span>
+              <div class="meta">
+                <div class="title">claudedot · refactor status bar</div>
+                <div class="sub"><b>Bash</b> · npm test --watch</div>
+              </div>
+              <div class="tok">182k</div>
+            </div>
+            <div class="ss">
+              <span class="dot run"></span>
+              <div class="meta">
+                <div class="title">monorepo · dependency upgrade</div>
+                <div class="sub"><b>running</b> · 24s ago</div>
+              </div>
+              <div class="tok">47k</div>
+            </div>
+            <div class="ss">
+              <span class="dot err"></span>
+              <div class="meta">
+                <div class="title">notes-cli · prompt experiments</div>
+                <div class="sub">Edit failed · settings.swift</div>
+              </div>
+              <div class="tok">9.1k</div>
+            </div>
+          </div>
+          <div class="ss-foot">
+            <span>Click a row to jump · <span class="kbd">⌘ .</span> hides island</span>
+            <span>open popover</span>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="meta" style="padding:0 22px;">
+          <div>
+            <h3>Expanded · sessionList — hover ≥ 180ms 触发</h3>
+            <p>列出全部非 idle 会话，每行 7px 状态点 + 标题 + <code>pending_tool</code> 副文 + 累计 tokens；
+              整行点击复用 popover 的 <code>jump(pid:cwd:)</code>。鼠标移开后 400ms 折回。</p>
+          </div>
+          <span class="tag">opened · sessionList</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- APPROVAL CARD（事件驱动 auto-expand） -->
+    <div class="stage">
+      <div class="frame-bar"><i></i><i></i><i></i><span class="menubar-time">15:09</span></div>
+      <div class="menubar-strip" style="height:260px;">
+        <div class="stage-caption">opened · approvalCard · auto-expand</div>
+        <div class="island expanded">
+          <div class="head">
+            <span class="spark">✳</span>
+            <span class="count">1</span>
+            <span class="cap-lbl">permission · Bash</span>
+            <span class="pulse wait"></span>
+          </div>
+          <div class="card">
+            <div class="meta-row">
+              <span>claudedot · refactor</span>
+              <span class="tag">~/work/claudedot</span>
+            </div>
+            <div class="q">Approve <b>Bash</b></div>
+            <div class="code">npm run build -- --dry-run</div>
+            <div class="opts">
+              <div class="opt go"><span class="k">→</span><span>Jump to terminal to respond</span></div>
+            </div>
+            <div class="progress" style="--cd:12s;"><i></i></div>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="meta" style="padding:0 22px;">
+          <div>
+            <h3>approvalCard — PreToolUse 触发的临时表面</h3>
+            <p>映射 hook <code>pending_tool</code> + <code>pending_input</code>。
+              单一动作 <b>「Jump to terminal to respond」</b>，对齐 popover 的设计目标
+              —— 岛体不在远端代答权限，只在终端解决。12s 倒计时后折回 closed；
+              指针进入卡片再离开 → 立即折回（看一眼就走的语义）。</p>
+          </div>
+          <span class="tag">opened · approvalCard</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- QUESTION CARD -->
+    <div class="stage">
+      <div class="frame-bar"><i></i><i></i><i></i><span class="menubar-time">15:23</span></div>
+      <div class="menubar-strip" style="height:300px;">
+        <div class="stage-caption">opened · questionCard · auto-expand</div>
+        <div class="island expanded">
+          <div class="head">
+            <span class="spark">✳</span>
+            <span class="count">1</span>
+            <span class="cap-lbl">question · 3 options</span>
+            <span class="pulse wait"></span>
+          </div>
+          <div class="card">
+            <div class="meta-row">
+              <span>monorepo · setup</span>
+              <span class="tag">~/dev/monorepo</span>
+            </div>
+            <div class="q">Which database should I use?</div>
+            <div class="opts">
+              <div class="opt"><span class="k">1</span><span>PostgreSQL</span></div>
+              <div class="opt"><span class="k">2</span><span>SQLite</span></div>
+              <div class="opt"><span class="k">3</span><span>MySQL</span></div>
+              <div class="opt go"><span class="k">→</span><span>Jump to terminal to respond</span></div>
+            </div>
+            <div class="progress" style="--cd:12s;"><i></i></div>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="meta" style="padding:0 22px;">
+          <div>
+            <h3>questionCard — UserPromptSubmit / Notification 触发</h3>
+            <p>预览前 4 个选项（多余折叠成 <code>+n more</code>）。
+              选项是<i>只读预览</i>，真正回答仍在终端键入；
+              点击任一选项行 = 跳转回应。这避免了与终端键盘输入抢权。</p>
+          </div>
+          <span class="tag">opened · questionCard</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- COMPLETION CARD -->
+    <div class="stage">
+      <div class="frame-bar"><i></i><i></i><i></i><span class="menubar-time">15:41</span></div>
+      <div class="menubar-strip" style="height:230px;">
+        <div class="stage-caption">opened · completionCard · auto-expand · 6s</div>
+        <div class="island expanded">
+          <div class="head">
+            <span class="spark" style="background-color:var(--is-green);"></span>
+            <span class="count">1</span>
+            <span class="cap-lbl"><span style="color:var(--is-green);">done</span> · 2 min</span>
+            <span class="pulse" style="background:var(--is-green);"></span>
+          </div>
+          <div class="card completion">
+            <div class="meta-row">
+              <span class="ok">claudedot · auth flow</span>
+              <span class="tag">142k tokens · 4m12s</span>
+            </div>
+            <div class="q">Add user auth flow</div>
+            <div class="opts">
+              <div class="opt"><span class="k">×</span><span>Dismiss</span></div>
+              <div class="opt go"><span class="k">→</span><span>Jump to session</span></div>
+            </div>
+            <div class="progress" style="--cd:6s;"><i></i></div>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="meta" style="padding:0 22px;">
+          <div>
+            <h3>completionCard — Stop 事件触发的提醒</h3>
+            <p>开发者常常没注意到 agent 跑完了。这张卡片是岛体最有<i>独立价值</i>的表面 ——
+              既不抢菜单栏，也不抢系统通知，但在视野边角给一次轻提醒。
+              6s 自动折回（比 approval/question 短，因为信息性强、不阻塞）。
+              副文显示累计 <code>tokens</code> 与耗时，从 transcript 算出。</p>
+          </div>
+          <span class="tag">opened · completionCard</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- 4. 交互行为 -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>6 · 功能需求 · 交互与生命周期</h2>
+    <div class="behave">
+      <div class="behave-row">
+        <div class="k">Trigger</div>
+        <div class="v"><b>常驻显示</b>。开关由 popover 底栏切换，状态持久化到 <code>UserDefaults.showDynamicIsland</code>。</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Refresh</div>
+        <div class="v">复用 <code>AppDelegate.refresh()</code> 的 1.5s tick，不引入新的数据源；与菜单栏猫头鹰同源。</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Hover</div>
+        <div class="v">≥ 180ms 展开为 <code>opened · sessionList</code>；离开后 400ms 折回。展开期间内容增量更新，<b>不重建</b> NSPanel。</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Click</div>
+        <div class="v">折叠态点击 = 打开 popover；展开态点击行 = <code>jump(pid:cwd:)</code>。</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Auto-expand</div>
+        <div class="v">
+          事件驱动展开为对应 variant：
+          <code>PreToolUse → approvalCard</code> ·
+          <code>UserPromptSubmit/Notification → questionCard</code> ·
+          <code>Stop → completionCard</code>。
+          展开是<b>动画式 push</b>，不抢键盘焦点（<code>becomesKey = false</code>），
+          不打断用户当前输入。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Auto-collapse</div>
+        <div class="v">
+          临时卡片倒计时：approvalCard / questionCard <b>12s</b>，completionCard <b>6s</b>。
+          指针进入卡片再离开 → <b>立即折回</b>（即「看一眼就走」语义，避免长期遮挡）。
+          已经折回的事件不重复推：30s 内同一会话不重弹同类卡片。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Variant 抢占</div>
+        <div class="v">
+          多事件同时到达：优先级 <code>approvalCard &gt; questionCard &gt; completionCard &gt; sessionList</code>。
+          高优先级到达时，低优先级卡片立即折回让位；同优先级按 FIFO 排队。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Hide</div>
+        <div class="v">全屏应用前置时（<code>NSMenu.menuBarVisible() == false</code>）自动隐藏；退出全屏即归位。</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Multi-display</div>
+        <div class="v">监听 <code>didChangeScreenParametersNotification</code>，仅显示在内建屏（<code>builtInScreen()</code>），外接显示器不复制。</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Non-notch Macs</div>
+        <div class="v"><code>safeAreaInsets.top == 0</code> 时退化为「菜单栏下方的居中胶囊」，圆角四向均匀，无刘海留白。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- 5. 度量规范 -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>7 · 度量与排印规范</h2>
+    <div class="behave">
+      <div class="behave-row">
+        <div class="k">Folded size</div>
+        <div class="v"><b>250 × (notch + 24)pt</b>，idle 时收窄到 140pt；圆角 = 内容高 / 2。</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Expanded size</div>
+        <div class="v"><b>420 × (notch + 内容)</b>，圆角 28pt；最多渲染 5 行，超出滚动。</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">主图标</div>
+        <div class="v">
+          猫头鹰 silhouette · 18×18 · 由 <code>owlImage()</code> 渲染为 <code>NSImage</code>，
+          作为模板图按 <code>background-color</code> 着色；默认 <code>--accent</code>，
+          状态切换时只换颜色不重绘路径。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Type — count</div>
+        <div class="v">Newsreader 500 · 19pt · letter-spacing −0.3 · tabular-nums</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Type — status (主词)</div>
+        <div class="v">SF Pro Text 500 · 11pt · 默认 ink；waiting → accent；error → red（对齐 popover <code>.st.attn</code>）</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Type — status (副词)</div>
+        <div class="v">SF Pro Text 400 · 10.5pt · ink-2 · 单行截断 + 省略号</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Type — tokens</div>
+        <div class="v">JetBrains Mono · 11pt · ink-3 · 仅出现在展开列表行</div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Colors on black</div>
+        <div class="v">
+          严格沿用 <code>design/DESIGN.md</code> dark token：
+          accent <code>#E96945</code> · ink <code>#ECE8DD</code> · ink-3 <code>rgba(236,232,221,.36)</code>
+          · green <code>#7A9B76</code> · red <code>#D27A66</code>。岛上不引入新色，仅黑底替换 surface。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Animation</div>
+        <div class="v">展开/收回 <code>cubic-bezier(.2,.8,.2,1)</code> 280ms · 脉冲环 1.6s ease-out 无限</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- §7 非功能需求 -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>8 · 非功能需求</h2>
+    <div class="behave">
+      <div class="behave-row">
+        <div class="k">Performance</div>
+        <div class="v">
+          <b>CPU ≤ 0.5%（folded · idle）/ ≤ 1.5%（expanded）。</b>
+          内容签名（<code>signature</code>）未变时不重建视图层，仅更新文本节点。
+          单次 <code>refresh()</code> 渲染 ≤ 8ms（与菜单栏 owl 同 tick，不引入新计时器）。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Memory</div>
+        <div class="v">
+          常驻 NSPanel 不复用 popover 的 NSWindow；
+          <b>额外内存占用 ≤ 4 MB</b>（含 owl glyph image cache）。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Fail-safe</div>
+        <div class="v">
+          数据源缺失或 <code>SessionVM</code> 异常时，
+          <b>岛体降级为 idle</b>（不崩、不抛），日志写入 <code>~/.claude/statusbar/log</code>。
+          决不阻塞 popover 或菜单栏 owl 的刷新。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Accessibility</div>
+        <div class="v">
+          NSPanel 的 <code>accessibilityLabel</code> = 「Claude Dot, <i>n</i> active, <i>状态文案</i>」。
+          VoiceOver 焦点可达；岛上元素不抢键盘焦点（<code>becomesKey = false</code>）。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Compatibility</div>
+        <div class="v">
+          要求 <b>macOS 12+</b>（依赖 <code>safeAreaInsets</code>）。
+          11 以下隐藏入口并在 popover 设置项中 disable 开关。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Privacy</div>
+        <div class="v">
+          展示在所有 Space / 锁屏前的 NSPanel 必须排除锁屏场景
+          （<code>collectionBehavior</code> 不含 <code>.canJoinAllSpaces</code> 时同 popover；
+          锁屏由系统兜底隐藏）。岛上不暴露完整 prompt 内容，仅显示 <code>title</code> / 工具名。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Theming</div>
+        <div class="v">
+          岛体始终 <b>纯黑</b>（无 light / dark 切换），与刘海无缝。
+          内文 accent 色随 <code>NSApp.effectiveAppearance</code> 提亮 ≈ 6%
+          以适配 dark mode 下系统壁纸偏白的情况。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Localization</div>
+        <div class="v">
+          状态文案模板字符串走 <code>NSLocalizedString</code>；
+          中英双语优先，<b>主词 ≤ 12 字符，副词 ≤ 28 字符</b>，超出截断 + 加省略号。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- §8 边界条件与非目标 -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>9 · 边界条件 · 异常处理</h2>
+    <div class="behave">
+      <div class="behave-row">
+        <div class="k">屏幕选择策略</div>
+        <div class="v">
+          <b>不要</b>用 <code>NSScreen.main</code>（= key window 所在屏，可能是外接屏）。
+          按下列顺序优先：
+          <code>safeAreaInsets.top &gt; 0</code> →
+          非空 <code>auxiliaryTopLeftArea / auxiliaryTopRightArea</code> →
+          fallback <code>NSScreen.screens.first</code>。
+          <i>(参考 open-vibe-island/docs/island-position-investigation.md 的关键 bug)</i>
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">定位数学</div>
+        <div class="v">
+          <b>notch 模式</b>从 <code>screen.frame</code>（不是 <code>visibleFrame</code>）顶部锚定，
+          并用 <code>safeAreaInsets.top</code> 作为刘海留白；
+          <b>fallback 模式</b>（非刘海）从 <code>visibleFrame.maxY</code> 顶部居中。
+          用同一套 <code>visibleFrame</code> 公式套两种屏 → 岛体永远比刘海低 ~42pt，融不进去。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">非刘海机型</div>
+        <div class="v">
+          <b>safeAreaInsets.top == 0 时</b>退化为「菜单栏正下方居中胶囊」，
+          圆角四向均匀（14pt），高度 = 28pt，宽度策略与刘海机型一致。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">全屏应用</div>
+        <div class="v">
+          监听 <code>NSMenu.menuBarVisible()</code>；
+          全屏 IDE / 视频 / 演示前置时 <code>orderOut</code>，
+          退出全屏后下个 tick 自动 <code>orderFrontRegardless</code>。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">外接显示器</div>
+        <div class="v">
+          仅在被选中的 built-in 屏显示，外接屏不复制；
+          <code>didChangeScreenParameters</code> 触发时重跑选择策略 + 重计 frame。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Bridge fail-open</div>
+        <div class="v">
+          岛体异常时 <b>绝不阻塞 hook</b>。
+          hook 写状态文件即返回，岛体读不到也只是退化为 idle；
+          数据源缺失 → 仍显示 ✳「Claude Dot」并降到 ink-3，<b>不</b>显示 error 红色
+          （error 是 agent 错误，不是岛体错误）。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">通知声音</div>
+        <div class="v">
+          completionCard 默认<b>静音</b>（环境层不应制造听觉打扰）；
+          approvalCard / questionCard 可在偏好里开启系统提示音（默认关）。
+          mute 开关与 popover 共享一个 <code>UserDefaults.soundsMuted</code>。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">同名会话</div>
+        <div class="v">
+          展开列表中两个会话 title 相同时，副词追加 cwd 末段（<code>…/repo-name</code>）做区分。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">超 5 个会话</div>
+        <div class="v">
+          展开列表最多 5 行，溢出底部出现 <code>“+n more · open popover”</code> 行，点击打开 popover。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">error 衰减</div>
+        <div class="v">
+          <code>error_at</code> 距今 &gt; 90s 后，岛体回落到次高优先级。
+          若所有 error 都已衰减且无 running / waiting，回到 idle 收窄态。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">用户主动关闭</div>
+        <div class="v">
+          <code>UserDefaults.showDynamicIsland = false</code> 时立即 <code>orderOut</code>，
+          下次启动也不显示；偏好与菜单栏 owl 完全独立。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">非目标（再次明确）</div>
+        <div class="v">
+          ❌ 不在岛上代答 permission（仅渲染 + jump） ❌ 不展示 token / subscription
+          ❌ 不替代菜单栏 owl ❌ 不复制到外接显示器 ❌ 不支持锁屏 widget
+          ❌ 不接收键盘输入 ❌ 不引入网络栈（Watch / Bonjour 留独立模块）
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <!-- §9 验收标准 -->
+  <!-- ──────────────────────────────────────────────────────────────── -->
+  <section>
+    <h2>10 · 验收标准（Definition of Done）</h2>
+    <div class="prio">
+      <div class="prio-row h">
+        <div>ID</div><div>类别</div><div>条件</div><div>验证手段</div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-1</div>
+        <div class="state">功能</div>
+        <div>启动后岛体常驻在内建屏刘海周围，无需任何点击。</div>
+        <div><code>snapshot 模式截图</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-2</div>
+        <div class="state">功能</div>
+        <div>0 会话 → idle 折叠；1+ 非 idle 会话 → 显示 count + 优先级最高文案。</div>
+        <div><code>demoData() 注入</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-3</div>
+        <div class="state">功能</div>
+        <div>状态优先级严格按 <code>error &gt; waiting &gt; running &gt; idle</code> 取最高。</div>
+        <div><code>aggregateStatus() 单测</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-4</div>
+        <div class="state">交互</div>
+        <div>hover ≥ 180ms 展开；离开 400ms 收回；动效 280ms ease。</div>
+        <div><code>UI test · 计时断言</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-5</div>
+        <div class="state">交互</div>
+        <div>点击展开行调用 <code>jump(pid:cwd:)</code>，与 popover 行为一致。</div>
+        <div><code>共享调用栈</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-6</div>
+        <div class="state">兼容</div>
+        <div>非刘海 Mac 上退化为菜单栏下胶囊，不破相。</div>
+        <div><code>M1 Air 真机验证</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-7</div>
+        <div class="state">兼容</div>
+        <div>全屏应用前置时岛体自动隐藏，退出全屏自动归位。</div>
+        <div><code>QuickTime 全屏 / IDE 全屏</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-8</div>
+        <div class="state">性能</div>
+        <div>idle 折叠态 CPU ≤ 0.5%，单次 refresh ≤ 8ms。</div>
+        <div><code>Instruments Time Profiler</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-9</div>
+        <div class="state">视觉</div>
+        <div>岛体始终纯黑、与刘海无缝；状态色与菜单栏 owl 同源。</div>
+        <div><code>统一 statusColor() 函数</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-10</div>
+        <div class="state">回归</div>
+        <div>关闭岛体后 popover、菜单栏 owl、hook 行为完全不变。</div>
+        <div><code>run_tests.sh 全绿</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-11</div>
+        <div class="state">表面模型</div>
+        <div>4 个 opened variant 都能渲染并按路由表正确触发，互不串台。</div>
+        <div><code>DEV harness 模拟事件</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-12</div>
+        <div class="state">兼容</div>
+        <div>双屏（外接 + 内建刘海）下岛体始终落在内建屏刘海上，<b>不会跑到外接屏</b>。</div>
+        <div><code>NSScreen 选择策略单测</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-13</div>
+        <div class="state">价值</div>
+        <div>agent 完成任务时 6s completionCard 必触发，含 token + 耗时摘要，可点击 jump。</div>
+        <div><code>hook.Stop → completionCard E2E</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-14</div>
+        <div class="state">容错</div>
+        <div>kill 掉岛体进程后，hook 仍然 0 退出码、popover 仍能打开、agent 不受影响。</div>
+        <div><code>fail-open 杀进程测试</code></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Claude Dot · Dynamic Island Requirements <b>v0.3</b></span>
+    <span>2026-06-02 · inspired by Octane0411/open-vibe-island · matches DESIGN.md</span>
+  </footer>
+</div>
+
+<script>
+  const root = document.documentElement;
+  document.querySelectorAll('.toggle button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      root.setAttribute('data-theme', b.dataset.set);
+      document.querySelectorAll('.toggle button').forEach(x=>x.classList.toggle('on', x===b));
+    });
+  });
+</script>
+</body>
+</html>

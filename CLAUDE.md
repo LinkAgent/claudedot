@@ -60,11 +60,17 @@ Aggregate icon picks the max: `error (3) > waiting (2) > running (1) > idle (0)`
 
 The **menu-bar glyph** is a vector owl (`owlImage(for:diameter:)`), `NSBezierPath` → `NSImage`, color = aggregate state via `statusColor(_:)` (running green / waiting yellow / error red / idle gray). `Status.emoji` in `Model.swift` is a fallback for headless contexts only.
 
-The **popover status dots** (`DotView`) follow `design/DESIGN.md` §4 via `Theme.popoverDotColor`: running = grey + animated pulse ring, waiting = terracotta accent + pulse ring, error = red, idle = green ("done"). These intentionally differ from the owl glyph's traffic-light colors (`statusColor`: running green / waiting amber / error red / idle grey) — the owl is the at-a-glance menu-bar summary; the dots match the popover's design language.
+The **popover status dots** (`DotView`) share `statusColor(_:)` with the owl glyph so the popover dot and the menu-bar icon read as the same state at a glance. Running and waiting dots get a faint static base ring plus an animated pulse ring (`viewDidMoveToWindow`).
 
 ### Previewing the UI (no Screen Recording permission)
 
-`screencapture` of the live menu bar/popover fails without TCC Screen Recording access. Instead use the built-in snapshot mode: `…/ClaudeStatusBar --snapshot out.png` renders the popover (light + dark, demo data via `demoData()`) offscreen through an `NSWindow` + `cacheDisplay` and writes a PNG. The owl glyph can be previewed the same way (render `owlImage(for:)` into a PNG).
+`screencapture` of the live menu bar/popover fails without TCC Screen Recording access. Instead use the built-in snapshot modes (all render offscreen via `NSView.cacheDisplay`, no Screen Recording needed):
+
+- `…/claudedot --snapshot out.png` — popover (light + dark, demo data via `demoData()`)
+- `…/claudedot --snapshot-island out.png` — dynamic island, folded + expanded × 0/2/5 sessions, on a simulated screen with a synthetic notch (so the wrap-the-notch positioning can be inspected). Uses `IslandLayout` for sizes — same code path as the live `DynamicIslandController`, so what's in the PNG matches what ships.
+- `…/claudedot --owls out.png` — the four owl glyph states as a strip.
+
+For runtime diagnostics on a real screen (without screen capture), set `CLAUDEDOT_DEBUG_ISLAND=1` before launch — `DynamicIslandController` writes its resolved screen frame, safe-area insets, and computed panel rect to stderr on every `applyFrame`.
 
 ## Jump-to-session
 

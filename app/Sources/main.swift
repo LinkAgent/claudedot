@@ -176,16 +176,6 @@ struct Theme {
     static func current(_ appearance: NSAppearance) -> Theme {
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
     }
-
-    // Dot states per DESIGN.md §4: wait=accent · run=grey · done=green · error=red.
-    func popoverDotColor(_ s: Status) -> NSColor {
-        switch s {
-        case .running: return ink3      // grey + animated ring = working
-        case .waiting: return accent    // terracotta + ring = needs you
-        case .error:   return danger
-        case .idle:    return green      // done
-        }
-    }
 }
 
 // Rounding: 16px popover, ~10px rows, small pills.
@@ -233,9 +223,8 @@ struct SessionVM {
 // Status dot with an animated pulse ring for running/waiting.
 final class DotView: NSView {
     let status: Status
-    let theme: Theme
-    init(status: Status, theme: Theme) {
-        self.status = status; self.theme = theme
+    init(status: Status) {
+        self.status = status
         super.init(frame: NSRect(x: 0, y: 0, width: 14, height: 14))
         wantsLayer = true
         widthAnchor.constraint(equalToConstant: 14).isActive = true
@@ -244,7 +233,7 @@ final class DotView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func draw(_ dirtyRect: NSRect) {
-        let c = theme.popoverDotColor(status)
+        let c = statusColor(status)
         let r: CGFloat = 3.5, cx = bounds.midX, cy = bounds.midY
         if status == .running || status == .waiting { // faint static base ring
             c.withAlphaComponent(0.45).setStroke()
@@ -261,7 +250,7 @@ final class DotView: NSView {
         if layer.sublayers?.contains(where: { $0.name == "pulse" }) == true { return }
         let ring = CAShapeLayer()
         ring.name = "pulse"
-        let c = theme.popoverDotColor(status)
+        let c = statusColor(status)
         ring.path = CGPath(ellipseIn: CGRect(x: bounds.midX-6, y: bounds.midY-6, width: 12, height: 12), transform: nil)
         ring.fillColor = nil
         ring.strokeColor = c.cgColor
@@ -352,6 +341,10 @@ struct PopoverHandlers {
     var viewLogs: () -> Void = {}
     var preferences: () -> Void = {}
     var quit: () -> Void = {}
+    // Dynamic Island toggle wired to the footer "Dynamic Island" item. nil
+    // hides the row in contexts (snapshot mode) that have no island.
+    var toggleIsland: (() -> Void)?
+    var islandEnabled: Bool = false
 }
 
 func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme, handlers: PopoverHandlers) -> NSView {
@@ -500,7 +493,7 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
         let row = HoverRow(theme: theme)
         row.onClick = { handlers.jump(s.pid, s.cwd, s.isDesktop) }
 
-        let dot = DotView(status: s.status, theme: theme)
+        let dot = DotView(status: s.status)
 
         let nameLine = NSMutableAttributedString()
         nameLine.append(NSAttributedString(string: s.folder, attributes: [.foregroundColor: theme.ink, .font: display(15, .medium)]))
@@ -603,6 +596,9 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
     }
     footItem("✳", "New session", "⌘N", handlers.newSession)
     footItem("⊟", "View all logs", "", handlers.viewLogs)
+    if let toggle = handlers.toggleIsland {
+        footItem(handlers.islandEnabled ? "◉" : "○", "Dynamic Island", "", toggle)
+    }
     footItem("⚙", "Preferences", "⌘,", handlers.preferences)
     footItem("⏻", "Quit", "⌘Q", handlers.quit)
     add(pad(footMenu, 5, 5, 5, 5))
@@ -698,6 +694,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // app (a reliable backstop to .transient for status-item popovers).
     var clickMonitor: Any?
 
+    // Top-center floating "island" (DynamicIsland.swift). Coexists with the
+    // menu-bar owl; default ON, persisted in UserDefaults. Fed from the same
+    // cached vms/stats the popover already builds.
+    let island = DynamicIslandController()
+
     // transcript token cache: sessionId -> (file offset already read, running total)
     var tokenOffset: [String: UInt64] = [:]
     var tokenTotal: [String: Int] = [:]
@@ -715,6 +716,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         popover.contentViewController = NSViewController()
         popover.contentViewController?.view = popoverHost
+        island.onJump = { [weak self] pid, cwd, isDesktop in
+            self?.jump(pid: pid, cwd: cwd, isDesktop: isDesktop)
+        }
+        island.onOpenPopover = { [weak self] in self?.togglePopover() }
         refresh()
         refreshPopoverData(loadSessions()) // warm the cache so the first click is instant
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.refresh() }
@@ -741,6 +746,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem.button?.image = statusIcon(for: agg, diameter: menuBarIconSize,
                                               appearance: statusItem.button?.effectiveAppearance)
         if popover.isShown { renderPopover(vms: cachedVMs, stats: cachedStats) }
+        island.update(sessions: cachedVMs, theme: Theme.current(NSApp.effectiveAppearance))
     }
 
     func anotherInstanceRunning() -> Bool {
@@ -993,6 +999,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                                               appearance: statusItem.button?.effectiveAppearance)
         statusItem.button?.title = attention > 0 ? " \(attention)" : (running > 0 ? " \(running)" : "")
 
+        // Push every tick to the Dynamic Island so its status dot/count stays
+        // live without depending on the popover being open. Tokens aren't shown
+        // in the island, so re-using cached values (else 0) avoids the heavy
+        // transcript parse on the main thread.
+        let cachedToks = Dictionary(uniqueKeysWithValues: cachedVMs.map { ($0.s.id, $0.tokens) })
+        let fastVMs = sessions.map { SessionVM(s: $0, tokens: cachedToks[$0.id] ?? 0) }
+        island.update(sessions: fastVMs, theme: Theme.current(NSApp.effectiveAppearance))
+
         // While open, refresh the popover's data in the background only when the
         // visible state actually changed (set lastSignature optimistically so we
         // don't re-kick every tick while the background task is in flight).
@@ -1021,6 +1035,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 self.cachedVMs = vms
                 self.cachedStats = stats
                 if self.popover.isShown { self.renderPopover(vms: vms, stats: stats) }
+                self.island.update(sessions: vms, theme: Theme.current(NSApp.effectiveAppearance))
             }
         }
     }
@@ -1083,6 +1098,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         h.preferences = { [weak self] in self?.popover.performClose(nil)
             NSWorkspace.shared.open(URL(fileURLWithPath: NSString(string: "~/.claude/settings.json").expandingTildeInPath)) }
         h.quit = { NSApp.terminate(nil) }
+        h.islandEnabled = island.enabled
+        h.toggleIsland = { [weak self] in
+            guard let self = self else { return }
+            self.island.enabled = !self.island.enabled
+            // Re-render the popover so the footer item's icon flips immediately.
+            if self.popover.isShown { self.renderPopover(vms: self.cachedVMs, stats: self.cachedStats) }
+        }
         return h
     }
 
@@ -1322,6 +1344,178 @@ func renderOwls(to path: String) {
     print("wrote \(path)  \(Int(w))x\(Int(h))")
 }
 
+// Offscreen preview of the Dynamic Island for visual review without TCC
+// Screen Recording. Renders every layout × variant on a simulated desktop with
+// a notch cutout, so the notch-wrapping look + content-below-notch positioning
+// can be inspected from the resulting PNG. See issue #12.
+func renderIslandSnapshot(to path: String) {
+    let simulatedSafeTop: CGFloat = 37  // typical notch height on 14"/16" MBP
+    let notchWidth: CGFloat = 200
+    let menuBarH: CGFloat = 24
+
+    func host(for vms: [SessionVM], layout: IslandLayout, variant: IslandCardVariant) -> (NSView, NSSize) {
+        let size: NSSize
+        switch layout {
+        case .closed:
+            let agg = aggregateStatus(vms.map { $0.s })
+            size = IslandGeom.foldedSize(safeAreaTop: simulatedSafeTop, idle: agg == .idle)
+        case .opened:
+            let n = activeCount(vms.map { $0.s })
+            size = IslandGeom.expandedSize(safeAreaTop: simulatedSafeTop, variant: variant, rowCount: n)
+        }
+        let h = IslandHostView(frame: NSRect(origin: .zero, size: size))
+        h.topInset = IslandGeom.notchInset(safeAreaTop: simulatedSafeTop)
+        h.update(sessions: vms, layout: layout, variant: variant)
+        h.layoutSubtreeIfNeeded()
+        return (h, size)
+    }
+
+    // Use the real wall clock — the host view's IslandFoldedLabel /
+    // aggregateStatus calls default to Date().timeIntervalSince1970, so a stale
+    // fixed `now` would make every running session decay to idle in the
+    // snapshot. Determinism isn't worth that.
+    let now = Date().timeIntervalSince1970
+    let pop0: [SessionVM] = []
+    let popRun: [SessionVM] = [
+        SessionVM(s: Session(id: "r1", folder: "refactor-status", cwd: "/x/refactor-status",
+                             status: .running, title: "refactor-status",
+                             lastEvent: "Bash · npm run build",
+                             updatedAt: now, pid: 1), tokens: 47_000),
+        SessionVM(s: Session(id: "r2", folder: "monorepo", cwd: "/x/monorepo",
+                             status: .running, title: "monorepo",
+                             lastEvent: "running tests 14/38",
+                             updatedAt: now - 10, pid: 2), tokens: 182_000),
+    ]
+    let popWait: [SessionVM] = [
+        SessionVM(s: Session(id: "w1", folder: "sample-api", cwd: "/x/sample-api",
+                             status: .waiting, title: "sample-api",
+                             lastEvent: "waiting · permission",
+                             updatedAt: now, pid: 11,
+                             pendingTool: "Bash", pendingInput: "npm test --watch"), tokens: 9_100),
+    ]
+    let popErr: [SessionVM] = [
+        SessionVM(s: Session(id: "e1", folder: "release-tools", cwd: "/x/release-tools",
+                             status: .error, title: "release-tools",
+                             lastEvent: "Edit failed",
+                             lastError: "settings.swift · permission denied",
+                             errorAt: now - 5, updatedAt: now - 5, pid: 21,
+                             pendingTool: "Edit"), tokens: 3_100),
+    ]
+    let popList: [SessionVM] = [
+        SessionVM(s: Session(id: "L1", folder: "claudedot · refactor status bar", cwd: "/x/claudedot",
+                             status: .waiting, title: "claudedot · refactor",
+                             updatedAt: now, pid: 1,
+                             pendingTool: "Bash", pendingInput: "npm test --watch"), tokens: 182_000),
+        SessionVM(s: Session(id: "L2", folder: "monorepo · dependency upgrade", cwd: "/x/mono",
+                             status: .running, title: "monorepo",
+                             lastEvent: "24s ago", updatedAt: now - 24, pid: 2), tokens: 47_000),
+        SessionVM(s: Session(id: "L3", folder: "notes-cli · prompt experiments", cwd: "/x/notes",
+                             status: .error, title: "notes-cli",
+                             lastError: "settings.swift",
+                             errorAt: now - 10, updatedAt: now - 10, pid: 3,
+                             pendingTool: "Edit"), tokens: 9_100),
+    ]
+    let popMany: [SessionVM] = (0..<7).map { i in
+        SessionVM(s: Session(id: "m\(i)", folder: "proj-\(i)", cwd: "/x/proj-\(i)",
+                             status: [.running, .waiting, .running, .error, .running, .running, .waiting][i],
+                             title: "project \(i)",
+                             lastEvent: "Working…", updatedAt: now, pid: Int32(100 + i),
+                             pendingTool: "Bash"), tokens: 12_000 * (i + 1))
+    }
+
+    struct Cell { let label: String; let vms: [SessionVM]; let layout: IslandLayout; let variant: IslandCardVariant }
+    let cells: [Cell] = [
+        Cell(label: "Closed · idle (140pt)",       vms: pop0,    layout: .closed, variant: .sessionList),
+        Cell(label: "Closed · running",            vms: popRun,  layout: .closed, variant: .sessionList),
+        Cell(label: "Closed · waiting (accent)",   vms: popWait, layout: .closed, variant: .sessionList),
+        Cell(label: "Closed · error",              vms: popErr,  layout: .closed, variant: .sessionList),
+        Cell(label: "Opened · sessionList ×3",     vms: popList, layout: .opened, variant: .sessionList),
+        Cell(label: "Opened · sessionList +more",  vms: popMany, layout: .opened, variant: .sessionList),
+        Cell(label: "Opened · approvalCard",       vms: popWait, layout: .opened, variant: .approval(sessionId: "w1")),
+        Cell(label: "Opened · completionCard",     vms: popRun,  layout: .opened, variant: .completion(sessionId: "r1")),
+    ]
+
+    // Each cell shows a simulated screen top-strip (menu bar + notch) with the
+    // island composited at its real position. Cell width must accommodate the
+    // expanded island plus padding.
+    let cellW: CGFloat = 520
+    let cellH: CGFloat = 320
+    let cols = 2
+    let rows = (cells.count + cols - 1) / cols
+    let pad: CGFloat = 24
+    let total = NSSize(width: pad + CGFloat(cols) * (cellW + pad),
+                       height: pad + CGFloat(rows) * (cellH + pad))
+
+    let img = NSImage(size: total)
+    img.lockFocus()
+    NSColor(hex: "1A1815").setFill()
+    NSRect(origin: .zero, size: total).fill()
+
+    for (idx, cell) in cells.enumerated() {
+        let col = idx % cols, row = idx / cols
+        let ox = pad + CGFloat(col) * (cellW + pad)
+        let oy = total.height - pad - CGFloat(row + 1) * cellH - CGFloat(row) * pad
+
+        // Simulated screen: cream desktop, dark menu bar across the top with
+        // a centered black notch carved out so we can see the wrap effect.
+        let bg = NSRect(x: ox, y: oy, width: cellW, height: cellH)
+        NSColor(hex: "5A8FB5").setFill()
+        NSBezierPath(roundedRect: bg, xRadius: 8, yRadius: 8).fill()
+
+        // Menu bar strip
+        let menu = NSRect(x: bg.minX, y: bg.maxY - menuBarH, width: bg.width, height: menuBarH)
+        NSColor.black.withAlphaComponent(0.35).setFill()
+        menu.fill()
+
+        // Notch: a black bump centered on the menu bar that intrudes downward.
+        let notchH: CGFloat = simulatedSafeTop
+        let notchRect = NSRect(x: bg.midX - notchWidth / 2,
+                                y: bg.maxY - notchH,
+                                width: notchWidth, height: notchH)
+        NSColor.black.setFill()
+        let notchPath = NSBezierPath()
+        notchPath.move(to: NSPoint(x: notchRect.minX, y: notchRect.maxY))
+        notchPath.line(to: NSPoint(x: notchRect.minX, y: notchRect.minY + 10))
+        notchPath.curve(to: NSPoint(x: notchRect.minX + 10, y: notchRect.minY),
+                        controlPoint1: NSPoint(x: notchRect.minX, y: notchRect.minY),
+                        controlPoint2: NSPoint(x: notchRect.minX, y: notchRect.minY))
+        notchPath.line(to: NSPoint(x: notchRect.maxX - 10, y: notchRect.minY))
+        notchPath.curve(to: NSPoint(x: notchRect.maxX, y: notchRect.minY + 10),
+                        controlPoint1: NSPoint(x: notchRect.maxX, y: notchRect.minY),
+                        controlPoint2: NSPoint(x: notchRect.maxX, y: notchRect.minY))
+        notchPath.line(to: NSPoint(x: notchRect.maxX, y: notchRect.maxY))
+        notchPath.close()
+        notchPath.fill()
+
+        // Render the island host into the cell, aligned so its top edge
+        // matches the simulated screen top (mirroring real placement).
+        let (view, sz) = host(for: cell.vms, layout: cell.layout, variant: cell.variant)
+        let islandX = bg.midX - sz.width / 2
+        let islandY = bg.maxY - sz.height
+        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: rep)
+        rep.draw(in: NSRect(x: islandX, y: islandY, width: sz.width, height: sz.height))
+
+        // Caption under the cell.
+        let cap = NSAttributedString(string: cell.label, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor(white: 0.8, alpha: 1)])
+        let s = cap.size()
+        cap.draw(at: NSPoint(x: bg.minX + 10, y: bg.minY + 8))
+        // Note dimensions on the right.
+        let dims = NSAttributedString(string: "\(Int(sz.width))×\(Int(sz.height))pt", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: NSColor(white: 0.55, alpha: 1)])
+        dims.draw(at: NSPoint(x: bg.maxX - dims.size().width - 10, y: bg.minY + 8))
+        _ = s
+    }
+
+    img.unlockFocus()
+    let final = NSBitmapImageRep(data: img.tiffRepresentation!)!
+    try? final.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+    print("wrote \(path)  \(Int(total.width))x\(Int(total.height))")
+}
+
 func renderAppIcon(to path: String, size: CGFloat = 1024) {
     let img = appIconImage(diameter: size)
     let rep = NSBitmapImageRep(data: img.tiffRepresentation!)!
@@ -1342,6 +1536,13 @@ if let i = CommandLine.arguments.firstIndex(of: "--owls"), i + 1 < CommandLine.a
     let app = NSApplication.shared
     app.setActivationPolicy(.prohibited)
     renderOwls(to: CommandLine.arguments[i + 1])
+    exit(0)
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--snapshot-island"), i + 1 < CommandLine.arguments.count {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.prohibited)
+    renderIslandSnapshot(to: CommandLine.arguments[i + 1])
     exit(0)
 }
 

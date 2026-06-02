@@ -41,6 +41,12 @@ def test_transitions():
     check("PreToolUse -> running", st["status"] == "running")
     check("last_event mentions tool", "Bash" in st["last_event"])
 
+    # User-blocking tools should mark the session as waiting (they ARE the wait).
+    st_b = h.compute_update(ev("PreToolUse", tool_name="AskUserQuestion"), {})
+    check("PreToolUse AskUserQuestion -> waiting", st_b["status"] == "waiting")
+    st_p = h.compute_update(ev("PreToolUse", tool_name="ExitPlanMode"), {})
+    check("PreToolUse ExitPlanMode -> waiting", st_p["status"] == "waiting")
+
     st = h.compute_update(ev("PostToolUse", tool_name="Bash", tool_response={"is_error": True, "error": "boom"}), st)
     check("PostToolUse error -> error", st["status"] == "error")
     check("error recorded", st["last_error"] == "boom")
@@ -55,10 +61,17 @@ def test_transitions():
     check("notification message shown", "permission" in st["last_event"])
 
     st = h.compute_update(ev("Stop"), st)
-    check("Stop -> idle", st["status"] == "idle")
+    check("Stop -> waiting (turn done, blocked on user)", st["status"] == "waiting")
+    check("Stop event text mentions awaiting input", "awaiting input" in st["last_event"])
+
+    # SubagentStop must NOT flip the parent to waiting — the parent agent is
+    # still running while a Task subagent finishes.
+    st_sub = h.compute_update(ev("SubagentStop"), {"status": "running"})
+    check("SubagentStop -> running (parent still working)", st_sub["status"] == "running")
 
     st2 = h.compute_update(ev("UserPromptSubmit", prompt="next task"), st)
     check("new turn clears error", st2["last_error"] is None)
+    check("new turn flips back to running", st2["status"] == "running")
 
 
 def test_pending_capture():

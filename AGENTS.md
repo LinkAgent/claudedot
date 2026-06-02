@@ -60,7 +60,7 @@ Aggregate icon picks the max: `error (3) > waiting (2) > running (1) > idle (0)`
 
 The **menu-bar glyph** is a vector owl (`owlImage(for:diameter:)`), `NSBezierPath` → `NSImage`, color = aggregate state via `statusColor(_:)` (running green / waiting yellow / error red / idle gray). `Status.emoji` in `Model.swift` is a fallback for headless contexts only.
 
-The **popover status dots** (`DotView`) follow `design/DESIGN.md` §4 via `Theme.popoverDotColor`: running = grey + animated pulse ring, waiting = terracotta accent + pulse ring, error = red, idle = green ("done"). These intentionally differ from the owl glyph's traffic-light colors (`statusColor`: running green / waiting amber / error red / idle grey) — the owl is the at-a-glance menu-bar summary; the dots match the popover's design language.
+The **popover status dots** (`DotView`) share `statusColor(_:)` with the owl glyph so the popover dot and the menu-bar icon read as the same state at a glance. Running and waiting dots get a faint static base ring plus an animated pulse ring (`viewDidMoveToWindow`).
 
 ### Previewing the UI (no Screen Recording permission)
 

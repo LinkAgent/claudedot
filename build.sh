@@ -20,6 +20,7 @@ swiftc -O \
     -framework AppKit \
     -o "$MACOS/$APP_NAME" \
     "$ROOT/app/Sources/Model.swift" \
+    "$ROOT/app/Sources/DynamicIsland.swift" \
     "$ROOT/app/Sources/main.swift"
 
 echo "==> Generating app icon"

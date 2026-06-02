@@ -1365,6 +1365,7 @@ func renderIslandSnapshot(to path: String) {
         }
         let h = IslandHostView(frame: NSRect(origin: .zero, size: size))
         h.topInset = IslandGeom.notchInset(safeAreaTop: simulatedSafeTop)
+        h.hasNotch = true   // snapshot draws a notch cutout above, so model it
         h.update(sessions: vms, layout: layout, variant: variant)
         h.layoutSubtreeIfNeeded()
         return (h, size)

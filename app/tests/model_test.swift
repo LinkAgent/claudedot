@@ -384,15 +384,17 @@ check("idle label main", l0.main == "Claude Dot")
 check("idle label kind", l0.kind == .idle)
 check("idle label sub empty", l0.sub == "")
 
-// Running session → "Running · <title>"
+// Running session → "Running · <folder>" (privacy: never use title, which
+// holds the user's prompt text)
 let lr = islandFoldedLabel(sessions: [
     Session(id: "r", folder: "refactor-status", status: .running,
-            title: "refactor-status", lastEvent: "Bash · npm run build",
-            updatedAt: now - 5),
+            title: "do something secret",  // must NOT leak into the label
+            lastEvent: "Bash · npm run build", updatedAt: now - 5),
 ], now: now)
 check("running label kind", lr.kind == .running)
-check("running label main starts with Running · ", lr.main.hasPrefix("Running · "))
+check("running label main uses folder", lr.main == "Running · refactor-stat…")
 check("running label sub uses lastEvent", lr.sub.contains("Bash"))
+check("running label never leaks title (prompt)", !lr.main.contains("secret") && !lr.sub.contains("secret"))
 
 // Waiting beats running and uses accent
 let lw = islandFoldedLabel(sessions: [

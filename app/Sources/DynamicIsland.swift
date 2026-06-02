@@ -282,6 +282,7 @@ final class DynamicIslandController {
             ensurePanel()
             if hasNotch { sawNotchHardware = true }
             host?.topInset = IslandGeom.notchInset(safeAreaTop: safeAreaTop)
+            host?.hasNotch = hasNotch
             host?.update(sessions: lastSessions, layout: layout, variant: variant)
             applyFrame(on: screen, safeAreaTop: safeAreaTop, hasNotch: hasNotch, animated: animated)
             if panel?.isVisible == false { panel?.orderFrontRegardless() }
@@ -347,6 +348,7 @@ final class DynamicIslandController {
         guard changed else { return }
         guard case .visible(let screen, let safeAreaTop, let hasNotch) = resolveTarget() else { return }
         host?.topInset = IslandGeom.notchInset(safeAreaTop: safeAreaTop)
+        host?.hasNotch = hasNotch
         host?.update(sessions: lastSessions, layout: l, variant: v)
         applyFrame(on: screen, safeAreaTop: safeAreaTop, hasNotch: hasNotch, animated: true)
     }
@@ -454,14 +456,20 @@ final class IslandHostView: NSView {
     var topInset: CGFloat = 0 {
         didSet { if topInset != oldValue { lastSig = ""; needsLayout = true } }
     }
+    // True on a notch MBP — bottom corners round, top edges stay square so the
+    // capsule tucks seamlessly under the notch. False on non-notch Macs — all
+    // four corners get the same 14pt radius (spec §9 "非刘海机型：四角均匀").
+    var hasNotch: Bool = false {
+        didSet { if hasNotch != oldValue { needsLayout = true } }
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer = CALayer()
         let bg = CALayer()
-        bg.cornerCurve = .continuous
         bg.backgroundColor = IslandPalette.bg.cgColor
+        bg.masksToBounds = true
         layer?.addSublayer(bg)
         bgLayer = bg
     }
@@ -516,42 +524,50 @@ final class IslandHostView: NSView {
 
     override func layout() {
         super.layout()
-        if let bg = bgLayer {
-            bg.frame = bounds
-            // Closed folded pill: bottom-rounded with bottom radius = content/2.
-            // Expanded: 28pt bottom radius per §7.
-            switch currentLayout {
-            case .closed:
-                let r = IslandGeom.foldedH / 2 + 4
-                bg.cornerRadius = r
-                bg.maskedCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner,
-                                    .layerMinXMinYCorner, .layerMaxXMinYCorner]
-                // Use a path-based mask so only the bottom corners round.
-                applyAsymmetricMask(top: 0, bottom: r)
-            case .opened:
-                let r: CGFloat = 28
-                applyAsymmetricMask(top: 0, bottom: r)
-            }
-        }
+        guard let bg = bgLayer else { return }
+        bg.frame = bounds
+        // Bottom radius differs by layout: 16pt for the folded pill, 28pt
+        // for the expanded card (spec §7 "圆角 28pt"). Non-notch Macs round
+        // all four corners with the same radius (no notch to hide into).
+        let bottom: CGFloat = currentLayout == .closed ? 16 : 28
+        let top: CGFloat = hasNotch ? 0 : bottom
+        applyShapedMask(topRadius: top, bottomRadius: bottom)
     }
 
-    // Mask that keeps the top edge square (so the notch tucks in seamlessly)
-    // and rounds only the bottom corners.
-    private func applyAsymmetricMask(top: CGFloat, bottom: CGFloat) {
-        let path = CGMutablePath()
+    // Path mask: top corners round only on non-notch Macs (so the notch on a
+    // notch MBP appears to BE the top of the capsule). The mask must have its
+    // frame set to bounds — without that, CAShapeLayer renders at origin and
+    // the corners visibly squared off (the bug v0.3 shipped with).
+    private func applyShapedMask(topRadius tr: CGFloat, bottomRadius br: CGFloat) {
         let b = bounds
-        path.move(to: CGPoint(x: b.minX, y: b.maxY))
-        path.addLine(to: CGPoint(x: b.maxX, y: b.maxY))
-        path.addLine(to: CGPoint(x: b.maxX, y: b.minY + bottom))
-        path.addArc(center: CGPoint(x: b.maxX - bottom, y: b.minY + bottom),
-                    radius: bottom, startAngle: 0, endAngle: -.pi / 2, clockwise: true)
-        path.addLine(to: CGPoint(x: b.minX + bottom, y: b.minY))
-        path.addArc(center: CGPoint(x: b.minX + bottom, y: b.minY + bottom),
-                    radius: bottom, startAngle: -.pi / 2, endAngle: .pi, clockwise: true)
+        guard b.width > 0, b.height > 0 else { return }
+        let path = CGMutablePath()
+        // Bottom-left corner (origin) — counter-clockwise traversal.
+        path.move(to: CGPoint(x: b.minX, y: b.minY + br))
+        if br > 0 {
+            path.addArc(center: CGPoint(x: b.minX + br, y: b.minY + br),
+                        radius: br, startAngle: .pi, endAngle: .pi * 1.5, clockwise: false)
+        }
+        path.addLine(to: CGPoint(x: b.maxX - br, y: b.minY))
+        if br > 0 {
+            path.addArc(center: CGPoint(x: b.maxX - br, y: b.minY + br),
+                        radius: br, startAngle: .pi * 1.5, endAngle: 0, clockwise: false)
+        }
+        path.addLine(to: CGPoint(x: b.maxX, y: b.maxY - tr))
+        if tr > 0 {
+            path.addArc(center: CGPoint(x: b.maxX - tr, y: b.maxY - tr),
+                        radius: tr, startAngle: 0, endAngle: .pi / 2, clockwise: false)
+        }
+        path.addLine(to: CGPoint(x: b.minX + tr, y: b.maxY))
+        if tr > 0 {
+            path.addArc(center: CGPoint(x: b.minX + tr, y: b.maxY - tr),
+                        radius: tr, startAngle: .pi / 2, endAngle: .pi, clockwise: false)
+        }
         path.closeSubpath()
-        _ = top
         let mask = CAShapeLayer()
         mask.path = path
+        mask.frame = b
+        mask.fillColor = NSColor.black.cgColor
         bgLayer?.mask = mask
     }
 

@@ -467,13 +467,31 @@ func islandFoldedLabel(sessions: [Session],
         let sub = islandTruncate(focus.lastError ?? focus.lastEvent, 28)
         return IslandLabel(main: main, sub: sub, kind: .error)
     case .waiting:
-        let tool = focus.pendingTool ?? "approval"
-        let main = "Awaiting · " + islandTruncate(tool, 12)
-        let sub = islandTruncate(focus.pendingInput ?? focus.title, 28)
+        // pendingTool may be nil if the native registry surfaced "waiting"
+        // before the PreToolUse hook fired (or for sessions that don't run
+        // hooks). Falling back to "approval" reads as a generic placeholder;
+        // the folder name is more informative — it identifies WHICH session is
+        // blocking, which is the question the user actually has.
+        let main: String = {
+            if let t = focus.pendingTool, !t.isEmpty {
+                return "Awaiting · " + islandTruncate(t, 12)
+            }
+            return "Awaiting · " + islandTruncate(focus.folder, 12)
+        }()
+        // Sub: pending_input (the Bash command, the WebFetch URL) only.
+        // NEVER fall back to title — that's the user's prompt text, and §8
+        // Privacy: 岛上不暴露完整 prompt 内容. When pending_input is missing
+        // show the cwd folder instead.
+        let sub: String = {
+            if let i = focus.pendingInput, !i.isEmpty {
+                return islandTruncate(i, 28)
+            }
+            return islandTruncate(focus.folder, 28)
+        }()
         return IslandLabel(main: main, sub: sub, kind: .waiting)
     case .running:
-        let title = !focus.title.isEmpty ? focus.title : focus.folder
-        let main = "Running · " + islandTruncate(title, 14)
+        // Same privacy rule: title may be the user's prompt — prefer folder.
+        let main = "Running · " + islandTruncate(focus.folder, 14)
         let sub: String = {
             if !focus.lastEvent.isEmpty { return islandTruncate(focus.lastEvent, 28) }
             return islandTruncate(focus.folder, 28)

@@ -228,6 +228,111 @@ check("desktop status from transcript, not native idle", md6.first?.status == .r
 let md7 = mergeSessions(native: [nsess("cli1", "busy")], hooks: [:], now: now)
 check("cli session not flagged desktop", md7.first?.isDesktop == false)
 
+// --- Functional / edge-case coverage added below ---
+
+// Status.priority ordering should match the documented hierarchy
+check("priority order error>waiting>running>idle",
+      Status.error.priority > Status.waiting.priority
+      && Status.waiting.priority > Status.running.priority
+      && Status.running.priority > Status.idle.priority)
+check("status labels distinct",
+      Set([Status.running, .waiting, .error, .idle].map { $0.label }).count == 4)
+
+// formatCount boundary behaviour
+check("formatCount 0", formatCount(0) == "0")
+check("formatCount 999", formatCount(999) == "999")
+check("formatCount 1000 rolls over to K", formatCount(1_000) == "1.0K")
+check("formatCount one_thousand_K rolls over to M (no 1000.0K)",
+      formatCount(999_999) != "1000.0K")  // see filed bug B
+check("formatCount handles negative small", formatCount(-5) == "-5")
+
+// relativeAge boundaries (transitions are >=, so exactly 5/60/3600/86400 cross over)
+check("ra 4s -> just now (under 5s)", relativeAge(now - 4, now: now) == "just now")
+check("ra exactly 5s shows seconds", relativeAge(now - 5, now: now) == "5s ago")
+check("ra exactly 60s shows minutes", relativeAge(now - 60, now: now) == "1m ago")
+check("ra exactly 3600s shows hours", relativeAge(now - 3600, now: now) == "1h ago")
+check("ra exactly 86400s shows days", relativeAge(now - 86400, now: now) == "1d ago")
+check("ra future timestamp -> just now", relativeAge(now + 30, now: now) == "just now")
+
+// Session.init? — an empty string for session_id should be rejected (a row with
+// no id is unrenderable and cannot dedup against native/desktop entries). See bug C.
+check("Session rejects empty session_id", Session(json: ["session_id": ""]) == nil)
+
+// pid stored as Double (JSONSerialization emits Double for non-integers)
+let sd = Session(json: ["session_id": "x", "pid": 4242.0])
+check("Session pid from Double", sd?.pid == 4242)
+
+// mergeSessions must carry hook pending fields onto a native-driven row.
+let mp2 = mergeSessions(
+    native: [NativeSession(pid: 1, sessionId: "x", cwd: "/a", nativeStatus: "busy", updatedAt: now)],
+    hooks: ["x": Session(id: "x", status: .running, updatedAt: now,
+                         pendingTool: "Bash", pendingInput: "rm -rf /")],
+    now: now)
+check("merge surfaces hook pendingTool over native", mp2.first?.pendingTool == "Bash")
+check("merge surfaces hook pendingInput over native", mp2.first?.pendingInput == "rm -rf /")
+
+// aggregateStatus must NOT decay a stale waiting session — a needs-input
+// session represents a question that hasn't been answered yet, and the wait
+// IS the silence. (Matches the desktop "stale waiting kept" rule.)
+let staleWait = Session(id: "x", status: .waiting, updatedAt: now - 99999)
+check("stale waiting persists in aggregate",
+      aggregateStatus([staleWait], now: now) == .waiting)
+
+// inferDesktopStatus boundary at exactly the liveness window (>=, not >):
+check("inferDesktopStatus exactly at 90s -> idle",
+      inferDesktopStatus(pendingTool: nil, mtime: now - runningLivenessWindow, now: now) == .idle)
+check("inferDesktopStatus just under 90s -> running",
+      inferDesktopStatus(pendingTool: nil, mtime: now - (runningLivenessWindow - 1), now: now) == .running)
+
+// NativeSession with no updatedAt parses but defaults to 0.
+let natNoUp = NativeSession(json: ["sessionId": "x", "pid": 1, "status": "busy"])
+check("NativeSession missing updatedAt -> 0", natNoUp?.updatedAt == 0)
+
+// transcript: the LAST assistant tool_use determines the pending tool.
+let multi: [[String: Any]] = [
+    ["message": ["role": "assistant", "content": [["type": "tool_use", "name": "Bash"]]]],
+    ["message": ["role": "assistant", "content": [["type": "tool_use", "name": "Edit"]]]],
+]
+check("transcript: last assistant tool wins", transcriptPendingTool(multi) == "Edit")
+
+// transcript: blocking tool inside a multi-tool turn takes precedence.
+let mixed: [[String: Any]] = [
+    ["message": ["role": "assistant", "content": [
+        ["type": "text", "text": "thinking"],
+        ["type": "tool_use", "name": "Bash"],
+        ["type": "tool_use", "name": "AskUserQuestion"],
+    ]]],
+]
+check("transcript: blocking tool wins within turn",
+      transcriptPendingTool(mixed) == "AskUserQuestion")
+
+// DesktopSession with empty cwd should still produce a non-empty folder/title
+// so the row is renderable. See filed bug D.
+let dEmpty = DesktopSession(json: ["cliSessionId": "abc-xyz", "cwd": "",
+                                    "lastActivityAt": now * 1000.0])
+check("DesktopSession empty-cwd folder non-empty", !(dEmpty?.folder.isEmpty ?? true))
+check("DesktopSession empty-cwd title non-empty", !(dEmpty?.title.isEmpty ?? true))
+
+// DesktopSession.activityText with no PR -> just "Desktop"
+let dNoPr = DesktopSession(sessionId: "x", cwd: "/a/b", status: .running, updatedAt: now)
+check("desktop activity no PR -> 'Desktop'", dNoPr.activityText == "Desktop")
+
+// sessionTokenTotal ignores lines lacking message/usage and tolerates malformed entries
+let mixedLines: [[String: Any]] = [
+    ["foo": "bar"],
+    ["message": "not a dict"],
+    ["message": ["usage": "not a dict"]],
+    ["message": ["usage": ["input_tokens": 7]]],
+]
+check("sessionTokenTotal robust to malformed entries", sessionTokenTotal(mixedLines) == 7)
+
+// mergeSessions sort tiebreak: identical updatedAt — should not crash and should preserve both
+let tie1 = mergeSessions(
+    native: [NativeSession(pid: 1, sessionId: "a", cwd: "/a/a", nativeStatus: "busy", updatedAt: now),
+             NativeSession(pid: 2, sessionId: "b", cwd: "/a/b", nativeStatus: "busy", updatedAt: now)],
+    hooks: [:], now: now)
+check("merge sort tie keeps both rows", tie1.count == 2)
+
 print("")
 if failures > 0 { print("FAILED: \(failures)"); exit(1) }
 print("ALL PASSED")

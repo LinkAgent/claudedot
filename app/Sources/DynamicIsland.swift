@@ -67,9 +67,15 @@ enum IslandCardVariant: Equatable {
 // those pixels), trail (count + word) sits to the RIGHT of the notch.
 // On a non-notch Mac the notch-core is just a wider middle of the pill (§9).
 struct IslandGeom {
-    // §2.0: pill total height = 28pt. No halo. No extending past menu bar.
-    static let foldedH: CGFloat = 28
-    static let menuBarAirGap: CGFloat = 2
+    // §2.0 (2026-06 update): pill height = NSScreen.menuBarHeight − 2 (1pt
+    // gap top + 1pt gap bottom). HARDCODED 28pt was a bug — 14"/16" MBP menu
+    // bar is ~38pt so the pill read as visibly shorter than neighboring
+    // status items (battery, clock, etc.); M1 Air / Intel Mac menu bar is
+    // ~24pt so the pill spilled past it. islandHeight is now threaded through
+    // foldedSize/expandedSize/origin/layout, computed from
+    // NSScreen.islandHeight per tick.
+    static let fallbackIslandH: CGFloat = 28   // used only when no screen present
+    static let airGap: CGFloat = 1   // 1pt top + 1pt bottom = pillH = menuBar − 2
 
     static let leadW: CGFloat = 46
     // Fallback notch-core width when the screen API gives us nothing useful.
@@ -89,13 +95,14 @@ struct IslandGeom {
     // doesn't clip the last letter.
     static let trailLGap: CGFloat = 18
     static let trailRPad: CGFloat = 16
-    static let closedRadius: CGFloat = 14
+    // §2.0 (2026-06): closedRadius is height/2 at use-site, NOT a constant.
+    // openedRadius stays fixed at 18 — the drawer can be 150pt tall, so
+    // using bounds.height/2 would render a balloon, not a card.
     static let openedRadius: CGFloat = 18
 
-    // Expanded — §2.0 / §7: head still constrained to the closed 28pt strip;
-    // only the drawer drops below the menu bar bottom into content area.
+    // Expanded — §2.0 / §7: head reuses the closed pill's 3-segment strip
+    // at the same height (= live islandHeight); drawer hangs below.
     static let expandedW: CGFloat = 480
-    static let headH: CGFloat = foldedH
     static let listVPad: CGFloat = 6
     static let footH: CGFloat = 24
     static let rowH: CGFloat = 38
@@ -122,15 +129,16 @@ struct IslandGeom {
         return trailLGap + cw + 5 + ww + trailRPad
     }
 
-    // notchCoreWidth runs every time we compute a size — it depends on the
-    // screen the pill is being laid out on, which can change at any
-    // didChangeScreenParameters (lid open/close, monitor swap).
-    static func foldedSize(notchCoreWidth: CGFloat, count: Int, word: String) -> NSSize {
+    // Both `islandHeight` and `notchCoreWidth` are resolved per-screen each
+    // tick — they depend on the display the pill is currently shown on, and
+    // a didChangeScreenParameters notification can swap that under us.
+    static func foldedSize(islandHeight: CGFloat, notchCoreWidth: CGFloat,
+                            count: Int, word: String) -> NSSize {
         NSSize(width: leadW + notchCoreWidth + trailWidth(count: count, word: word),
-               height: foldedH)
+               height: islandHeight)
     }
 
-    static func expandedSize(notchCoreWidth: CGFloat,
+    static func expandedSize(islandHeight: CGFloat, notchCoreWidth: CGFloat,
                               variant: IslandCardVariant, rowCount: Int) -> NSSize {
         let body: CGFloat
         switch variant {
@@ -142,20 +150,18 @@ struct IslandGeom {
         case .question:    body = questionH
         case .completion:  body = completionH
         }
-        // The head reuses the closed pill's 3-segment layout, so the expanded
-        // width incorporates the same notch-core width — keeps both surfaces
-        // aligned visually at the same widths around the notch.
-        let _ = notchCoreWidth   // currently not encoded in width; expandedW is fixed per spec §7
-        return NSSize(width: expandedW, height: headH + body)
+        // Head reuses the closed pill's 3-segment layout at islandHeight;
+        // expandedW is fixed per spec §7. notchCoreWidth flows in via the
+        // host so head trail visually aligns with the closed pill below.
+        let _ = notchCoreWidth
+        return NSSize(width: expandedW, height: islandHeight + body)
     }
 
-    // Origin: top edge FLUSH with screen.maxY (matches the mock — no gap
-    // above the pill). The 28pt pill bottom lands 4pt above the 32pt menu
-    // bar bottom, still respecting §2.0's "bottom must not exceed menu bar
-    // bottom" hard constraint.
+    // Origin: pill sits 1pt below screen top (1pt air gap), bottom lands 1pt
+    // above the menu bar bottom — the "上下各 1pt 气口" contract from §2.0.
     static func origin(on screenFrame: NSRect, size: NSSize) -> NSPoint {
         let x = screenFrame.midX - size.width / 2
-        let y = screenFrame.maxY - size.height
+        let y = screenFrame.maxY - airGap - size.height
         return NSPoint(x: x, y: y)
     }
 }
@@ -364,11 +370,11 @@ final class DynamicIslandController {
         case .visible(let screen, let hadNotch):
             ensurePanel()
             if hadNotch { sawNotchHardware = true }
-            // Set the live notch-core width BEFORE host.update so the first
-            // frame's inner layout uses the right core width on this screen
-            // (didChangeScreenParameters fires here, the notch width can
-            // change mid-session when monitors swap).
+            // Set live geometry BEFORE host.update so the first frame's
+            // inner layout (notch-core width, head height, corner radius)
+            // uses the right values on this screen.
             host?.notchCoreWidth = screen.islandNotchCoreWidth
+            host?.islandHeight = screen.islandHeight
             host?.update(sessions: lastSessions, layout: layout, variant: variant)
             applyFrame(on: screen, animated: animated)
             if panel?.isVisible == false { panel?.orderFrontRegardless() }
@@ -405,7 +411,7 @@ final class DynamicIslandController {
         if panel != nil { return }
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0,
                                             width: IslandGeom.leadW + IslandGeom.coreFallback + 80,
-                                            height: IslandGeom.foldedH),
+                                            height: IslandGeom.fallbackIslandH),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         p.isFloatingPanel = true
@@ -419,7 +425,7 @@ final class DynamicIslandController {
         p.becomesKeyOnlyIfNeeded = true
         let h = IslandHostView(frame: NSRect(x: 0, y: 0,
                                               width: IslandGeom.leadW + IslandGeom.coreFallback + 80,
-                                              height: IslandGeom.foldedH))
+                                              height: IslandGeom.fallbackIslandH))
         h.controller = self
         p.contentView = h
         panel = p
@@ -436,6 +442,7 @@ final class DynamicIslandController {
         guard changed else { return }
         guard case .visible(let screen, _) = resolveTarget() else { return }
         host?.notchCoreWidth = screen.islandNotchCoreWidth
+        host?.islandHeight = screen.islandHeight
         host?.update(sessions: lastSessions, layout: l, variant: v)
         applyFrame(on: screen, animated: true)
     }
@@ -488,13 +495,11 @@ final class DynamicIslandController {
     private func applyFrame(on screen: NSScreen, animated: Bool) {
         guard let panel = panel else { return }
         let core = screen.islandNotchCoreWidth
-        let size = sizeForState(notchCoreWidth: core)
+        let h = screen.islandHeight
+        let size = sizeForState(islandHeight: h, notchCoreWidth: core)
         let origin = IslandGeom.origin(on: screen.frame, size: size)
         let r = NSRect(origin: origin, size: size)
-        log("applyFrame layout=\(layout) variant=\(variant) screen=\(screen.frame) notchCore=\(core) panel=\(r)")
-        // Tell the host the live notch-core width so makeCoreSegment lays the
-        // empty middle out at exactly the right size on this screen.
-        host?.notchCoreWidth = core
+        log("applyFrame layout=\(layout) variant=\(variant) screen=\(screen.frame) menuBar=\(screen.menuBarHeight) pillH=\(h) notchCore=\(core) panel=\(r)")
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.28
@@ -506,16 +511,18 @@ final class DynamicIslandController {
         }
     }
 
-    private func sizeForState(notchCoreWidth: CGFloat) -> NSSize {
+    private func sizeForState(islandHeight: CGFloat, notchCoreWidth: CGFloat) -> NSSize {
         switch layout {
         case .closed:
             let agg = aggregateStatus(lastSessions.map { $0.s })
             let count = activeCount(lastSessions.map { $0.s })
-            return IslandGeom.foldedSize(notchCoreWidth: notchCoreWidth,
+            return IslandGeom.foldedSize(islandHeight: islandHeight,
+                                          notchCoreWidth: notchCoreWidth,
                                           count: count, word: islandStatusWord(agg))
         case .opened:
             let nonIdle = activeCount(lastSessions.map { $0.s })
-            return IslandGeom.expandedSize(notchCoreWidth: notchCoreWidth,
+            return IslandGeom.expandedSize(islandHeight: islandHeight,
+                                            notchCoreWidth: notchCoreWidth,
                                             variant: variant, rowCount: nonIdle)
         }
     }
@@ -543,6 +550,13 @@ final class IslandHostView: NSView {
     // physical notch on whichever display we're currently shown on.
     var notchCoreWidth: CGFloat = IslandGeom.coreFallback + IslandGeom.coreSafetyMargin {
         didSet { if notchCoreWidth != oldValue { lastSig = ""; needsLayout = true } }
+    }
+    // Live island (pill / head) height — set by the controller from the
+    // resolved screen's menu-bar height. Drives both the closed pill's full
+    // height and the expanded panel's head strip. Also drives the corner
+    // radius (= islandHeight/2 for closed) so any height yields a full pill.
+    var islandHeight: CGFloat = IslandGeom.fallbackIslandH {
+        didSet { if islandHeight != oldValue { lastSig = ""; needsLayout = true } }
     }
 
     override init(frame: NSRect) {
@@ -606,10 +620,13 @@ final class IslandHostView: NSView {
         super.layout()
         guard let bg = bgLayer else { return }
         bg.frame = bounds
-        // Single full-pill radius; no more "flat top + rounded bottom" — the
-        // v0.3 contract is a true floating capsule inside the menu bar.
+        // Closed: full pill, radius = height/2 (works for ANY menu-bar
+        // height — 14"/16" MBP ~38pt → 18pt radius; M1 Air ~24pt → 11pt
+        // radius; per §2.0, NEVER hardcode 14pt).
+        // Opened: fixed 18pt — the panel can be 150pt+ tall, so bounds/2
+        // would render a balloon.
         bg.cornerRadius = currentLayout == .closed
-            ? IslandGeom.closedRadius
+            ? islandHeight / 2
             : IslandGeom.openedRadius
     }
 
@@ -746,13 +763,13 @@ final class IslandHostView: NSView {
             stack.topAnchor.constraint(equalTo: wrap.topAnchor),
             stack.leadingAnchor.constraint(equalTo: wrap.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: wrap.trailingAnchor),
-            stack.heightAnchor.constraint(equalToConstant: IslandGeom.headH),
+            stack.heightAnchor.constraint(equalToConstant: islandHeight),
             divider.topAnchor.constraint(equalTo: stack.bottomAnchor),
             divider.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 14),
             divider.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -14),
             divider.heightAnchor.constraint(equalToConstant: 0.5),
             divider.bottomAnchor.constraint(equalTo: wrap.bottomAnchor),
-            wrap.heightAnchor.constraint(equalToConstant: IslandGeom.headH),
+            wrap.heightAnchor.constraint(equalToConstant: islandHeight),
         ])
         return wrap
     }
@@ -1360,4 +1377,32 @@ extension NSScreen {
     var islandNotchCoreWidth: CGFloat {
         realNotchWidth + IslandGeom.coreSafetyMargin
     }
+
+    // Visible menu bar height in screen points. Three-tier per spec §2.0
+    // (2026-06):
+    //
+    //   1. Notch Mac: safeAreaInsets.top IS the menu bar visual height (the
+    //      menu bar is drawn to the notch's full vertical extent so app menus
+    //      sit beside the cutout). ~38pt on 14"/16" MBP M-series.
+    //   2. Non-notch Mac: frame.maxY − visibleFrame.maxY measures the chrome
+    //      above the user-visible area (menu bar; dock at side doesn't count).
+    //      Clamp < 80pt to discard weird display configs.
+    //   3. NSStatusBar.system.thickness + 2 — ~24pt floor when both APIs
+    //      give us nothing useful.
+    //
+    // Used to size the pill so it visually matches neighboring status items.
+    // Previously hardcoded 28pt left a visible "stub" gap on notched Macs and
+    // overflowed on non-notch Macs.
+    var menuBarHeight: CGFloat {
+        if #available(macOS 12.0, *) {
+            let inset = safeAreaInsets.top
+            if inset > 0 { return inset }
+        }
+        let chrome = frame.maxY - visibleFrame.maxY
+        if chrome > 0 && chrome < 80 { return chrome }
+        return NSStatusBar.system.thickness + 2
+    }
+
+    // Pill height: menu bar − 2pt (1pt air gap top + 1pt bottom).
+    var islandHeight: CGFloat { menuBarHeight - 2 }
 }

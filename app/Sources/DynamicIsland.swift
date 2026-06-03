@@ -90,13 +90,20 @@ struct IslandGeom {
     static let completionH: CGFloat = 116
     static let maxRows: Int = 5
 
+    // Measure the trail at render-time font sizes (serif 17 count + SF 11.5
+    // word + 5pt gap) so the pill width matches what actually draws.
+    // Otherwise a tighter-sized window clips the right edge of the word.
     static func trailWidth(count: Int, word: String) -> CGFloat {
         guard !word.isEmpty, count > 0 else { return 0 }
         let countText = count >= 100 ? "99+" : "\(count)"
-        let str = NSAttributedString(string: "\(countText) \(word)", attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-        ])
-        return ceil(str.size().width) + trailRPad + 6
+        let countFont: NSFont = {
+            let b = NSFont.systemFont(ofSize: 17, weight: .medium)
+            return b.fontDescriptor.withDesign(.serif).flatMap { NSFont(descriptor: $0, size: 17) } ?? b
+        }()
+        let wordFont = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        let cw = ceil(NSAttributedString(string: countText, attributes: [.font: countFont]).size().width)
+        let ww = ceil(NSAttributedString(string: word, attributes: [.font: wordFont]).size().width)
+        return cw + 5 + ww + trailRPad + 6
     }
 
     static func foldedSize(count: Int, word: String) -> NSSize {
@@ -118,16 +125,13 @@ struct IslandGeom {
         return NSSize(width: expandedW, height: headH + body)
     }
 
-    // Origin per §2.0 + §9: pill floats inside the menu bar with a 2pt gap
-    // from the screen top. Identical math on notch and non-notch — §9 says
-    // visual & functional parity, "差异仅在定位算法 ... fallback 从
-    // screen.frame.top + 2pt 直接定位". For BOTH: top = screen.maxY - 2 - h.
-    // On a notch Mac the central 180pt of the pill is OVERLAID by the physical
-    // notch cutout — the pill is still 28pt tall, just visually masked in the
-    // middle.
+    // Origin: top edge FLUSH with screen.maxY (matches the mock — no gap
+    // above the pill). The 28pt pill bottom lands 4pt above the 32pt menu
+    // bar bottom, still respecting §2.0's "bottom must not exceed menu bar
+    // bottom" hard constraint.
     static func origin(on screenFrame: NSRect, size: NSSize) -> NSPoint {
         let x = screenFrame.midX - size.width / 2
-        let y = screenFrame.maxY - menuBarAirGap - size.height
+        let y = screenFrame.maxY - size.height
         return NSPoint(x: x, y: y)
     }
 }
@@ -636,7 +640,9 @@ final class IslandHostView: NSView {
         }
         let countText = count >= 100 ? "99+" : "\(count)"
         let countLabel = NSTextField(labelWithString: countText)
-        countLabel.font = serif(14, .medium)
+        // Mock CSS uses 19px; spec text §7 says 14pt. 17pt is the readable
+        // middle that still clears the 28pt pill top with .centerY alignment.
+        countLabel.font = serif(17, .medium)
         countLabel.textColor = IslandPalette.ink
         countLabel.drawsBackground = false; countLabel.isBordered = false
         countLabel.translatesAutoresizingMaskIntoConstraints = false

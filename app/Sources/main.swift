@@ -1490,11 +1490,10 @@ func renderIslandSnapshot(to path: String) {
         notchPath.close()
         notchPath.fill()
 
-        // Spec §2.0: pill floats INSIDE the menu bar with a 2pt air gap; the
-        // bottom edge does not exceed the menu-bar bottom by even one pixel.
+        // Mirror IslandGeom.origin: top edge flush with simulated screen top.
         let (view, sz) = host(for: cell.vms, layout: cell.layout, variant: cell.variant)
         let islandX = bg.midX - sz.width / 2
-        let islandY = bg.maxY - IslandGeom.menuBarAirGap - sz.height
+        let islandY = bg.maxY - sz.height
         let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
         view.cacheDisplay(in: view.bounds, to: rep)
         rep.draw(in: NSRect(x: islandX, y: islandY, width: sz.width, height: sz.height))

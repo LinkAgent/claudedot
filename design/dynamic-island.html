@@ -37,9 +37,16 @@
   :root{
     --is-bg:#0A0A0A;                      /* 黑，贴合刘海 */
     --is-ink:#ECE8DD;                     /* = --ink (dark theme) */
-    --is-ink-2:rgba(236,232,221,.62);     /* = --ink-2 */
-    --is-ink-3:rgba(236,232,221,.36);     /* = --ink-3 */
-    --is-border:rgba(236,232,221,.08);
+    /* 在纯黑底上，popover 的 .62 / .36 不够读；提到 .82 / .60 才稳。 */
+    --is-ink-2:rgba(236,232,221,.82);
+    --is-ink-3:rgba(236,232,221,.60);
+    --is-border:rgba(236,232,221,.10);
+    --is-divider:rgba(236,232,221,.10);   /* sessionList 分隔线 */
+    /* fg- 是抽屉里 ss-row 用的别名，与 ink- 同语义（早期遗留两套命名）。
+       统一指向 ink-，避免再出现"未定义变量 → 文字隐身"的 bug。 */
+    --is-fg:var(--is-ink);
+    --is-fg-2:var(--is-ink-2);
+    --is-fg-3:var(--is-ink-3);
     --is-accent:#E96945;                  /* = --accent，与 popover .glyph 一致 */
     --is-green:#7A9B76;                   /* = --green (dark)  */
     --is-red:#D27A66;                     /* 红只在 error 时出现 */
@@ -167,182 +174,216 @@
   /* ══════════════════════════════════════════════════════════════════
      灵动岛舞台
      ══════════════════════════════════════════════════════════════════ */
+  /* 每个 stage 模拟一块真实屏幕：浅色菜单栏 + 桌面壁纸。
+     黑色胶囊绝对定位到菜单栏中央，视觉上就是"贴在状态栏里的加长 notch"。 */
   .stage{
     position:relative;
-    background:linear-gradient(180deg,#1a1815 0%, #232017 100%);
-    border-radius:18px;padding:0 0 36px;overflow:hidden;
+    background:#1a1815;
+    border-radius:14px;overflow:hidden;
     border:.5px solid var(--border);
     box-shadow:var(--shadow);
     margin-bottom:18px;
   }
   [data-theme="dark"] .stage{
-    background:linear-gradient(180deg,#0e0d0b 0%, #161410 100%);
-  }
-  .stage .frame-bar{
-    height:30px;background:rgba(0,0,0,.35);
-    display:flex;align-items:center;padding:0 14px;gap:8px;
-    border-bottom:.5px solid rgba(255,255,255,.04);
-  }
-  .stage .frame-bar i{
-    width:11px;height:11px;border-radius:50%;display:block;
-    background:rgba(255,255,255,.18);
-  }
-  .stage .frame-bar i:nth-child(1){background:#ff5f57;}
-  .stage .frame-bar i:nth-child(2){background:#febc2e;}
-  .stage .frame-bar i:nth-child(3){background:#28c840;}
-  .stage .frame-bar .menubar-time{
-    margin-left:auto;color:rgba(255,255,255,.45);
-    font-family:-apple-system,sans-serif;font-size:11px;letter-spacing:.4px;
+    background:#0e0d0b;
   }
 
+  /* fake macOS 菜单栏 —— 浅奶油色，黑色岛体与它对比强烈 */
+  .stage .frame-bar{
+    position:relative;z-index:1;
+    height:32px;
+    background:linear-gradient(180deg,#f4efe4 0%, #ebe5d6 100%);
+    border-bottom:.5px solid rgba(0,0,0,.08);
+    display:flex;align-items:center;
+    padding:0 16px;
+    font-family:-apple-system,"SF Pro Text",sans-serif;
+    font-size:12px;color:rgba(28,24,18,.82);
+    letter-spacing:.05px;
+  }
+  /* 老的"红黄绿窗口圆点"不再用 —— 隐藏 */
+  .stage .frame-bar i{display:none;}
+  /* 左侧 app + 菜单项；不依赖 emoji 字体，纯文字 */
+  .stage .frame-bar::before{
+    content:"  Finder    File    Edit    View    Window    Help";
+    white-space:pre;font-weight:600;
+  }
+  /* 右侧状态图标占位 + 时间 */
+  .stage .frame-bar .menubar-time{
+    margin-left:auto;
+    color:rgba(28,24,18,.72);
+    font-family:-apple-system,sans-serif;font-size:11.5px;
+    font-variant-numeric:tabular-nums;letter-spacing:.3px;
+    font-weight:500;
+  }
+  .stage .frame-bar .menubar-time::before{
+    content:"100%  ";
+    margin-right:6px;color:rgba(28,24,18,.52);font-weight:500;
+  }
+
+  /* 模拟桌面壁纸区域 —— 给黑色岛体一个清晰的"非纯黑"参照 */
   .menubar-strip{
-    position:relative;height:88px;
-    display:flex;align-items:flex-start;justify-content:center;
-    padding-top:0;
+    position:relative;
+    height:130px;
+    display:block;
     background:
-      radial-gradient(800px 200px at 50% 100%, rgba(255,255,255,.025), transparent 70%);
+      radial-gradient(ellipse 220% 80% at 25% -10%, rgba(233,105,69,.28), transparent 60%),
+      radial-gradient(ellipse 200% 100% at 80% 110%, rgba(122,155,118,.22), transparent 60%),
+      linear-gradient(180deg, #3a322a 0%, #2a231d 100%);
   }
   .stage-caption{
-    position:absolute;left:18px;top:14px;
+    position:absolute;left:18px;bottom:10px;
     font-family:-apple-system,sans-serif;font-size:10px;letter-spacing:1.5px;
-    text-transform:uppercase;color:rgba(255,255,255,.32);
+    text-transform:uppercase;color:rgba(255,255,255,.55);
+  }
+
+  /* 把岛体绝对定位到菜单栏中央 —— 用负 top 让它压在 .frame-bar 上方，
+     视觉就是"原生刘海在水平方向被加长成一条胶囊"。
+     展开态的 drawer 自然向下延伸到桌面区，演示"仅展开允许下探"。 */
+  .menubar-strip .island{
+    position:absolute;
+    /* mockup 用 32pt 模拟菜单栏 - 30pt 岛体 = 上下各 1pt 气口；实现层按真实菜单栏算 */
+    top:calc(-1 * var(--island-h) - 1px);
+    left:50%;transform:translateX(-50%);
+    z-index:5;
   }
 
   /* ══════════════════════════════════════════════════════════════════
-     灵动岛胶囊（折叠态）
-     - 上端贴齐屏幕顶部，宽度 250pt，高度 = 刘海高度 (≈ 32) + 24 内容条
-     - 圆角 = 内容条高 / 2，让左右两端与刘海下沿圆滑相切
+     灵动岛胶囊（折叠 / 常驻态）—— 全圆角悬浮胶囊
+     - 整体 = 左段 (lead) + 中段 (notch-core) + 右段 (trail)
+     - 总高 = 28pt（菜单栏 32pt 内上下各留 2pt 气口）
+     - 四角全圆角（border-radius = height / 2 = 14pt）—— 真正的"胶囊"
+     - 视觉概念：在菜单栏里悬浮一颗黑色加长药丸，水平包覆物理 notch 区域
+     - 下边缘仍绝不越过菜单栏底线（零下探约束未变）
      ══════════════════════════════════════════════════════════════════ */
   .island{
+    --notch-w:220px;        /* 中段宽度 fallback：覆盖 14"-16" MBP 物理 notch (~205-225pt) + 左右各 12pt 安全余量。
+                               <u>实现层必须从 NSScreen.auxiliaryTopLeftArea 运行时算</u>，此值仅 mockup 默认。 */
+    --island-h:30px;        /* mockup 默认值，模拟典型 32pt 菜单栏减 2pt 上下气口。
+                               <u>实现层必须从 NSScreen 实时算菜单栏高度</u>，详见 §2.0 / §7 / §9。 */
+    --island-radius:15px;   /* = --island-h / 2，full-pill（高度变时同步） */
+    --island-expanded-w:480px;  /* 展开态硬契约宽度，所有 variant 一致 */
+    --island-expanded-radius:18px;
     background:var(--is-bg);color:var(--is-fg);
-    border-radius:0 0 22px 22px;
-    width:250px;height:60px;
-    display:flex;align-items:flex-end;
-    padding:0 14px 8px;
-    font-family:"Newsreader",Georgia,serif;
-    box-shadow:0 6px 24px rgba(0,0,0,.45);
+    border-radius:var(--island-radius);    /* 四角全圆，不再 0 0 X X */
+    height:var(--island-h);
+    display:flex;align-items:stretch;
+    font-family:-apple-system,"SF Pro Text",sans-serif;
+    box-shadow:0 6px 24px rgba(0,0,0,.55), 0 0 0 .5px rgba(0,0,0,.4);
     transition:width .28s cubic-bezier(.2,.8,.2,1),
                height .28s cubic-bezier(.2,.8,.2,1),
                border-radius .28s;
     position:relative;cursor:default;overflow:hidden;
   }
-  /* 模拟刘海的吸光感 — 顶部 32pt 是刘海占据区，不放内容 */
-  .island::before{
-    content:"";position:absolute;left:0;right:0;top:0;height:32px;
-    background:#000;pointer-events:none;
+
+  /* 左段 / notch 占位 / 右段 —— 三段同高，水平拼接 */
+  .island .lead,
+  .island .notch-core,
+  .island .trail{
+    display:flex;align-items:center;height:100%;
+  }
+  .island .lead{
+    padding:0 10px 0 16px;flex-shrink:0;
+    /* 仅一个彩色 owl —— glyph 颜色本身即状态，不再放脉冲点。
+       左 padding 16pt：药丸左端是 full-pill 圆弧，需要比矩形更多内缩量，
+       否则 owl 视觉上贴在圆弧上看着挤。右 padding 10pt 即可（紧邻 notch-core）。 */
+  }
+  /* notch-core: 物理刘海占据的视觉区，与 .island 同色，无内容 */
+  .island .notch-core{
+    width:var(--notch-w);flex-shrink:0;pointer-events:none;
+  }
+  .island .trail{
+    padding:0 14px 0 10px;
+    flex-shrink:0;        /* 内容定宽，避免被挤压 */
+    overflow:hidden;position:relative;
   }
 
-  .row{
-    position:relative;z-index:1;display:flex;align-items:center;
-    gap:10px;width:100%;
+  /* stagger-in 沿用旧关键帧 */
+  .island .lead > *, .island .trail > *{
+    opacity:0;animation:rise .4s cubic-bezier(.2,.7,.2,1) forwards;
   }
-  /* stagger-in（沿用 popover 的 rise 关键帧） */
-  .row > *{opacity:0;animation:rise .4s cubic-bezier(.2,.7,.2,1) forwards;}
-  .row > *:nth-child(1){animation-delay:.04s;}
-  .row > *:nth-child(2){animation-delay:.08s;}
-  .row > *:nth-child(3){animation-delay:.12s;}
-  .row > *:nth-child(4){animation-delay:.16s;}
+  .island .lead > *:nth-child(1){animation-delay:.04s;}
+  .island .lead > *:nth-child(2){animation-delay:.08s;}
+  .island .trail > *{animation-delay:.12s;}
   @keyframes rise{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
 
-  /* 左：猫头鹰主图标 —— 按状态切换 claudedot-icons.html 的现成表情：
-     run=绿色聚焦脸 · wait=黄色脸 · err=红色怒脸 · idle=炭灰静默脸。
-     图标直接渲染（全彩），不再 tint；状态由"换脸 + 右侧 dot"双重表达。 */
+  /* 右段：{count} {状态单词} —— 只两 token，禁止 marquee、禁止溢出
+     count 用 serif 数字、label 用 SF；按 §3 优先级染色（attn / err / 默认 ink）。 */
+  .island .ticker{
+    display:flex;align-items:baseline;gap:5px;white-space:nowrap;
+  }
+  .island .ticker .count{
+    font-family:"Newsreader",Georgia,serif;font-weight:500;font-size:14px;
+    line-height:1;color:var(--is-ink);letter-spacing:-.2px;
+    font-variant-numeric:tabular-nums;
+  }
+  .island .ticker .label{
+    font-family:-apple-system,"SF Pro Text",sans-serif;
+    font-size:11.5px;color:var(--is-ink);font-weight:500;letter-spacing:.15px;
+  }
+  .island .ticker .label.attn{color:var(--is-accent);}
+  .island .ticker .label.err{color:var(--is-red);}
+
+  /* 左段：猫头鹰主图标 —— 按状态换脸（对应 claudedot-icons.html 的 face() 配置）
+     run=绿脸 · wait=黄脸 · err=红怒脸 · idle=炭灰静默。glyph 自带状态色，
+     不再叠脉冲点。32pt 行高内放 22px owl，上下各留 5pt 气口。 */
   .spark{
     display:inline-block;flex-shrink:0;
-    width:24px;height:24px;font-size:0;          /* 放大到 24px；吞掉历史字符 */
-    background: var(--owl-run) center/contain no-repeat;   /* 默认 = 聚焦绿 */
-    border-radius:5px;                            /* 与 100×100 rounded-square 视觉一致 */
+    width:22px;height:22px;font-size:0;
+    background: var(--owl-run) center/contain no-repeat;
+    border-radius:5px;
   }
   .spark.run { background-image: var(--owl-run); }
   .spark.wait{ background-image: var(--owl-wait); }
   .spark.err { background-image: var(--owl-err); }
-  .spark.done{ background-image: var(--owl-run); }   /* 完成态复用聚焦绿脸 */
-  .spark.idle{ background-image: var(--owl-idle); }  /* 炭灰脸天然在黑底上后退 */
+  .spark.done{ background-image: var(--owl-run); }
+  .spark.idle{ background-image: var(--owl-idle); }
 
-  /* 中：count（serif，对齐 popover .head .mark）+ 状态文字 */
-  .count{
-    font-family:"Newsreader",Georgia,serif;
-    font-weight:500;font-size:19px;letter-spacing:-.3px;
-    line-height:1;color:var(--is-ink);
-    font-variant-numeric:tabular-nums;
-  }
-  .status-line{
-    display:flex;flex-direction:column;justify-content:center;
-    line-height:1.15;gap:1px;flex:1;min-width:0;
-  }
-  /* 主词：SF 11px 500 —— 对齐 popover .st */
-  .status-line .label{
-    font-family:-apple-system,"SF Pro Text",sans-serif;
-    font-size:11px;color:var(--is-ink);font-weight:500;letter-spacing:.1px;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  }
-  /* 副词：SF 10.5px ink-2 —— 对齐 popover .st 次行 */
-  .status-line .sub{
-    font-family:-apple-system,"SF Pro Text",sans-serif;
-    font-size:10.5px;color:var(--is-ink-2);letter-spacing:.1px;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  }
-  /* attn = waiting，按 popover .st.attn 用 accent */
-  .status-line .label.attn{color:var(--is-accent);}
-  .status-line .label.err{color:var(--is-red);}
-  /* running 主词保持中性 ink —— popover 里也是 ink-2 配 spinner，不是绿色 */
-
-  /* 右：状态点 —— 完全沿用 popover .dot 的语义
-     run = ink-3 灰 + 灰色脉冲环 · wait = accent + accent 脉冲环 · err = red + red 脉冲环 */
-  .pulse{
-    width:7px;height:7px;border-radius:50%;flex-shrink:0;
-    margin-left:auto;position:relative;
-  }
-  .pulse.run{background:var(--is-ink-3);}
-  .pulse.run::after{
-    content:"";position:absolute;inset:-4px;border-radius:50%;
-    border:1px solid var(--is-ring-run);
-    animation:ring 1.8s ease-out infinite;
-  }
-  .pulse.wait{background:var(--is-accent);}
-  .pulse.wait::after{
-    content:"";position:absolute;inset:-4px;border-radius:50%;
-    border:1px solid var(--is-accent);opacity:.5;
-    animation:ring 1.5s ease-out infinite;
-  }
-  .pulse.err{background:var(--is-red);}
-  .pulse.err::after{
-    content:"";position:absolute;inset:-4px;border-radius:50%;
-    border:1px solid var(--is-red);opacity:.5;
-    animation:ring 1.5s ease-out infinite;
-  }
-  .pulse.idle{background:rgba(236,232,221,.18);}
-  @keyframes ring{
-    0%{transform:scale(.6);opacity:.8;}
-    100%{transform:scale(1.5);opacity:0;}
-  }
-
-  /* idle 态 — 收窄；文字与 ✳ 都降到 ink-3 */
-  .island.idle{width:140px;}
-  .island.idle .status-line .label{color:var(--is-ink-3);font-weight:400;}
+  /* idle 态 — 0 活跃会话时右段隐藏，整条收窄到 "notch + 左段 owl"，
+     视觉接近"原生 notch 略微变宽"。 */
+  .island.idle .trail{display:none;}
 
   /* ══════════════════════════════════════════════════════════════════
-     展开态（hover / 长按）
+     展开态（hover / 事件触发）—— 头部仍是 32pt 横向胶囊（与折叠态同形），
+     下方挂一层 drawer 抽屉。只有 drawer 部分允许下探到内容区。
      ══════════════════════════════════════════════════════════════════ */
   .island.expanded{
-    width:420px;height:auto;min-height:60px;
-    border-radius:0 0 28px 28px;
-    align-items:stretch;flex-direction:column;padding:0 0 10px;
+    /* 硬契约：所有 variant（sessionList / approvalCard / questionCard / completionCard）
+       展开宽度 = --island-expanded-w 一致。内容不能撑大、不能压缩。 */
+    width:var(--island-expanded-w);
+    min-width:var(--island-expanded-w);
+    max-width:var(--island-expanded-w);
+    height:auto;min-height:var(--island-h);
+    border-radius:var(--island-expanded-radius);
+    flex-direction:column;align-items:stretch;
+    padding:0 0 10px;
   }
-  .island.expanded::before{height:32px;}
-  .island.expanded .row{padding:0 16px 10px;}
+  /* .head 复用 closed 态的 lead/notch-core/trail 内部结构，限定在 32pt */
   .island.expanded .head{
-    padding:34px 16px 10px;display:flex;align-items:center;gap:10px;
+    height:var(--island-h);min-height:var(--island-h);
+    display:flex;align-items:stretch;flex-shrink:0;
     border-bottom:.5px solid var(--is-divider);
+    padding:0;
   }
-  .island.expanded .head .count{font-size:22px;}
-  /* 与 popover 的 .cap 同源：9px 大写 letterspaced 小标 */
-  .island.expanded .cap-lbl{
+  .island.expanded .head .lead,
+  .island.expanded .head .notch-core,
+  .island.expanded .head .trail{
+    display:flex;align-items:center;height:100%;
+  }
+  .island.expanded .head .lead{padding:0 10px 0 16px;flex-shrink:0;}
+  .island.expanded .head .notch-core{width:var(--notch-w);flex-shrink:0;}
+  .island.expanded .head .trail{
+    padding:0 14px 0 10px;flex:1;min-width:0;gap:6px;
+  }
+  .island.expanded .head .cap-lbl{
     font-family:-apple-system,"SF Pro Text",sans-serif;
     font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;
     color:var(--is-ink-3);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   }
-  .island.expanded .head .pulse{margin-left:auto;}
+  .island.expanded .head .count{
+    font-family:"Newsreader",Georgia,serif;font-weight:500;font-size:14px;
+    color:var(--is-ink);font-variant-numeric:tabular-nums;letter-spacing:-.2px;
+  }
 
   .ss-list{padding:8px 6px 4px;display:flex;flex-direction:column;gap:1px;}
   .ss{
@@ -544,9 +585,13 @@
       <p style="margin:0 0 8px;"><b>目标。</b></p>
       <ul style="margin-top:0;">
         <li><b>常驻可见</b>：无需点击即可获知活跃会话数与最高优先级状态。</li>
-        <li><b>零干扰</b>：idle 时退化为「刘海延伸」，不抢视觉焦点。</li>
+        <li><b>零干扰</b>：idle 时右段隐藏、整体收窄到仅 owl + 物理 notch 占位的悬浮药丸，
+            不抢视觉焦点。</li>
+        <li><b>零下探（常驻态）</b>：closed 态<u>高度 ≤ 菜单栏高度</u>，仅在左右方向延伸把 notch 包成一条横向加长胶囊
+            —— 参考高德地图的灵动岛形态。<b>不允许</b>侵入下方内容区，避免遮挡应用界面。
+            展开态（opened，由用户主动或事件触发）仍允许下探，详见 §2 与 §4。</li>
         <li><b>一跳直达</b>：展开后点击行直接 jump 到会话所在终端。</li>
-        <li><b>零新数据源</b>：复用 popover 已有的 <code>SessionVM</code> 与 <code>refresh()</code> tick。</li>
+        <li><b>零新数据源</b>:复用 popover 已有的 <code>SessionVM</code> 与 <code>refresh()</code> tick。</li>
         <li><b>视觉一致</b>：与 popover、菜单栏 owl 同色、同节拍、同 priority 函数。</li>
       </ul>
       <p style="margin:8px 0 0;"><b>非目标。</b></p>
@@ -593,7 +638,7 @@
         <div class="lvl">US-4</div>
         <div class="state">solo user</div>
         <div>我目前没在跑任何 session，希望岛<b>几乎不存在</b>，不要在编辑器上方分散注意力。</div>
-        <div><code>idle → 140pt 收窄, 36% 不透明</code></div>
+        <div><code>idle → 隐藏 trail, 整条 ≈ 240pt, 36% 不透明</code></div>
       </div>
       <div class="prio-row">
         <div class="lvl">US-5</div>
@@ -621,6 +666,58 @@
   <!-- ──────────────────────────────────────────────────────────────── -->
   <section>
     <h2>2 · 功能需求 · 折叠态三要素</h2>
+
+    <div class="anno" style="margin-top:0;">
+      <p style="margin:0 0 8px;"><b>2.0 · 形态与占位约束（resting footprint）。</b>
+        折叠态是一颗悬浮在菜单栏里的<b>全圆角横向加长胶囊（药丸）</b>
+        —— 形如 iOS Dynamic Island 的横向版本 / 高德地图灵动岛。
+      </p>
+      <ul style="margin-top:0;">
+        <li><b>高度（运行时算，禁止硬编码）</b>：closed 态总高 = <b>菜单栏可视高度 - 2pt</b>
+            （上下各 1pt 气口），<u>必须从 <code>NSScreen</code> 实时算</u>，不能写死 28pt。
+            实测值：14"/16" MBP 含刘海 ≈ 38pt → 岛高 36pt；M1 Air 非刘海 ≈ 24pt → 岛高 22pt；
+            外接屏断连后菜单栏也可能跳到不同高度。算法见 §9 "菜单栏高度差异"。
+            <u>禁止</u>下边缘超过菜单栏底线一像素 —— 不能遮挡下方窗口内容。
+            <u>禁止</u>明显矮于状态栏图标 —— 视觉上必须与系统 status item（如微信、电池）等高同行。</li>
+        <li><b>圆角</b>：<b>四角全圆，radius = height / 2</b>（真胶囊 / 药丸形态）。
+            高度变时圆角必须同步重算，不能写死 14pt。
+            <u>不再</u>采用"顶部直角贴屏顶 + 底部圆角"的早期方案 —— 视觉上是悬浮药丸而非屏顶延伸。</li>
+        <li><b>水平形态</b>：以物理 notch 区域为中心，向<b>左右两段对称延伸</b>出信息区；
+            整体黑色 #0A0A0A 与 notch 同色，视觉上是"包裹住 notch 的悬浮黑色药丸"。</li>
+        <li><b>notch-core 宽度必须运行时算</b>，<u>禁止硬编码 180pt</u>。不同机型物理 notch 宽差异显著
+            （14" Pro ~205pt / 16" Max ~225pt），固定 180pt 会让 trail 的首 token（数字）落进物理刘海
+            被挡住。算法：
+            <code>notchCoreWidth = max(auxiliaryTopLeftArea.frame.maxX - auxiliaryTopRightArea.frame.minX, safeAreaInsets.top * 5) + 24pt 安全余量</code>
+            （左右各 12pt 缓冲，避开 notch 的边缘渐变）。fallback 到 220pt 而非 180pt。</li>
+        <li><b>左段（lead）</b>：<b>仅一个彩色换脸 owl glyph</b>（22×22，glyph 自带状态色）。
+            <u>不放</u>状态脉冲点 —— owl 的颜色本身就是状态（run 绿 / wait 黄 / err 红怒 / idle 炭灰），
+            再叠一个 .pulse 是冗余。<u>禁止</u>放文字。
+            （脉冲点仅在展开的 sessionList 行内、每个 task 自己的状态点保留。）</li>
+        <li><b>右段（trail）</b>：<b>仅两个 token</b> ——
+            <code>{activeCount} {状态单词}</code>，如 <code>"2 Running"</code> /
+            <code>"1 Awaiting"</code> / <code>"1 Error"</code>。
+            状态单词按 §3 优先级取最高级的单词（Error / Awaiting / Running / idle 隐藏整段）。
+            <u>不要</u>展开标题、tool 名、cwd 等长文案 —— 那些信息留给点击展开后的列表/卡片，
+            岛上常驻态只做"一眼可读"的状态摘要。
+            <b>禁止 marquee 滚动</b> —— 一旦内容溢出意味着设计违规，应裁剪而非滚动。</li>
+        <li><b>idle 收窄</b>：0 活跃会话时右段隐藏，整体收窄到仅"notch + 左段 owl"，
+            肉眼接近"原生 notch 略微变宽"。</li>
+        <li><b>展开（opened）允许下探，但宽度硬契约</b>：用户 hover/click 或事件触发的
+            sessionList / approvalCard / questionCard / completionCard 仍按 §4 / §5 渲染为下沉面板，
+            下边缘可进入内容区 —— 仅 closed 态受高度约束。
+            <b>展开宽度恒等于 <code>--island-expanded-w = 480pt</code></b>，
+            所有 variant 一致，内容不能撑大、不能压缩；超长 cap-lbl / 选项行截断 + 省略号，
+            sessionList 行数超 5 时滚动而非加宽。
+            展开 ⇄ 收起的动画：宽度 296 ⇄ 480pt 横向插值 + 高度 28 ⇄ 抽屉高纵向插值，
+            280ms ease。</li>
+        <li><b>非 notch 屏退化</b>：<code>safeAreaInsets.top == 0</code> 时不存在物理 notch，
+            退化为菜单栏正下方一条同样不下探超过菜单栏底线的胶囊（保持"零下探"语义一致）。</li>
+      </ul>
+      <p style="margin:8px 0 0;"><b>下方 Icon / Number / Status text 三要素仍然成立</b>，
+        映射到新形态：Icon = 左段彩色 owl glyph；Number = 右段首字 <code>activeCount</code>；
+        Status text = 右段尾字（Error / Awaiting / Running）。形如 <code>"2 Running"</code>。</p>
+    </div>
+
     <div class="req-grid">
       <div class="req">
         <div class="k">Icon</div>
@@ -628,7 +725,8 @@
         <div class="d">
           复用 <code>claudedot-icons.html</code> 的现成表情，<b>按状态换脸</b>：
           run=绿色聚焦 · wait=黄色 · err=红色怒脸 · idle=炭灰静默。
-          24×24 全彩渲染（内联 base64）。状态由「换脸 + 右侧 <code>.dot</code>」双重表达。
+          22×22 全彩渲染（内联 base64）。状态<b>唯一表达 = glyph 颜色</b>，
+          不在 owl 旁边再叠脉冲点 —— 简洁、单一信息源。
         </div>
       </div>
       <div class="req">
@@ -657,30 +755,30 @@
     <h2>3 · 功能需求 · 状态优先级与文案模板</h2>
     <div class="prio">
       <div class="prio-row h">
-        <div>Level</div><div>State</div><div>Folded label</div><div>Source</div>
+        <div>Level</div><div>State</div><div>Closed trail（右段唯一文案）</div><div>Source</div>
       </div>
       <div class="prio-row">
         <div class="lvl">3</div>
         <div class="state"><span class="swatch" style="background:#D27A66"></span>error</div>
-        <div>主词 <b>“Error · &lt;tool&gt;”</b> (red) · 副词 <code>last_error</code></div>
+        <div><code>{count}</code> <b>Error</b>（red）·  例 <code>"1 Error"</code></div>
         <div><code>hook.last_error</code> · 90s 衰减</div>
       </div>
       <div class="prio-row">
         <div class="lvl">2</div>
         <div class="state"><span class="swatch" style="background:#E96945"></span>waiting</div>
-        <div>主词 <b>“Awaiting · &lt;pending_tool&gt;”</b> (accent) · 副词 <code>pending_input</code></div>
+        <div><code>{count}</code> <b>Awaiting</b>（accent）·  例 <code>"1 Awaiting"</code></div>
         <div><code>hook.pending_tool</code></div>
       </div>
       <div class="prio-row">
         <div class="lvl">1</div>
         <div class="state"><span class="swatch" style="background:#9A968C"></span>running</div>
-        <div>主词 <b>“Running · &lt;title&gt;”</b> (ink) · 副词 当前工具或 cwd</div>
+        <div><code>{count}</code> <b>Running</b>（ink）·  例 <code>"2 Running"</code></div>
         <div><code>native.busy</code></div>
       </div>
       <div class="prio-row">
         <div class="lvl">0</div>
         <div class="state"><span class="swatch" style="background:#6F6B61"></span>idle</div>
-        <div>仅炭灰 owl + “Claude Dot”，天然在黑底上后退</div>
+        <div>右段隐藏；仅炭灰 owl 贴在 notch 左侧</div>
         <div><code>—</code></div>
       </div>
     </div>
@@ -688,10 +786,13 @@
       <b>聚合规则：</b>取所有会话状态的最大值（max-priority），
       与菜单栏猫头鹰使用同一函数 <code>aggregateStatus()</code>。
       <ul>
-        <li><b>error</b> 文案只在 <code>runningLivenessWindow = 90s</code> 内有效，过期回落。</li>
-        <li>当 <code>waiting/running</code> 数 ≥ 2 时，副文案显示<i>最近活跃</i>会话标题；
-            只有 1 个会话时直接展示该会话的 <code>title</code> 或 <code>pending_tool</code>。</li>
-        <li>idle 态 0 会话时建议把岛宽收到 140pt，避免长期占据视觉。</li>
+        <li><b>右段只有两 token</b>：<code>{activeCount}</code> + <b>单一状态词</b>（Error / Awaiting / Running）。
+            不展开 <code>title / pending_tool / last_error</code> 等具体信息 —— 那些进展开层。</li>
+        <li><b>error</b> 计数只在 <code>runningLivenessWindow = 90s</code> 内有效，过期回落到更低级。</li>
+        <li><code>count</code> = 该状态下的会话数（非聚合下所有非 idle 总数，而是当前显示状态的同级数）。
+            例：3 running + 1 waiting → 右段 <code>"1 Awaiting"</code>（取最高级 waiting 的 count）。</li>
+        <li>idle 态 0 会话时隐藏 trail 段、整条收到 ≈ 240pt（仅 lead + notch-core），
+            肉眼接近"原生 notch 略微变宽"，避免长期占据视觉。</li>
       </ul>
     </div>
   </section>
@@ -777,12 +878,12 @@
       <div class="menubar-strip">
         <div class="stage-caption">idle · 0 sessions</div>
         <div class="island idle">
-          <div class="row">
+          <div class="lead">
             <span class="spark idle"></span>
-            <div class="status-line">
-              <span class="label">Claude&nbsp;Dot</span>
-            </div>
-            <span class="pulse idle"></span>
+          </div>
+          <div class="notch-core"></div>
+          <div class="trail">
+            <div class="ticker"><span class="label">Claude&nbsp;Dot</span></div>
           </div>
         </div>
       </div>
@@ -790,7 +891,8 @@
         <div class="meta" style="padding:0 22px;">
           <div>
             <h3>Idle — 静默常驻</h3>
-            <p>没有活跃会话时收窄到 140pt，只剩猫头鹰；文字色降到 36% 透明度，肉眼几乎只是黑色刘海的延伸。</p>
+            <p>没有活跃会话时右段隐藏，整条收窄到 "notch + 左段 owl"；肉眼只是原生 notch 略微变宽，
+              不下探一像素。文字色降到 ink-3 / 36% 不透明。</p>
           </div>
           <span class="tag">level 0</span>
         </div>
@@ -803,22 +905,25 @@
       <div class="menubar-strip">
         <div class="stage-caption">running · 2 sessions</div>
         <div class="island">
-          <div class="row">
+          <div class="lead">
             <span class="spark run"></span>
-            <span class="count">2</span>
-            <div class="status-line">
-              <span class="label">Running · refactor-status</span>
-              <span class="sub">Bash · npm run build</span>
+          </div>
+          <div class="notch-core"></div>
+          <div class="trail">
+            <div class="ticker">
+              <span class="count">2</span>
+              <span class="label">Running</span>
             </div>
-            <span class="pulse run"></span>
           </div>
         </div>
       </div>
       <div class="state-card">
         <div class="meta" style="padding:0 22px;">
           <div>
-            <h3>Running — 绿点 + 脉冲环</h3>
-            <p>主文字 “running” 用 <code>--green</code>，副文字给最近活跃会话标题；右侧绿色脉冲环 1.6s 循环，与 popover 行内的 <code>DotView</code> 同节拍。</p>
+            <h3>Running — 绿脸 owl</h3>
+            <p>左段 owl 切到 run 绿脸（颜色即状态，无脉冲点）。
+              右段固定 <code>{count} Running</code> 两 token，状态词 ink 色；标题、tool、cwd 等不在岛上常驻，
+              点击展开后由 sessionList 展示，每行自带 7px 状态点。</p>
           </div>
           <span class="tag">level 1</span>
         </div>
@@ -831,14 +936,15 @@
       <div class="menubar-strip">
         <div class="stage-caption">waiting · needs input</div>
         <div class="island">
-          <div class="row">
+          <div class="lead">
             <span class="spark wait"></span>
-            <span class="count">1</span>
-            <div class="status-line">
-              <span class="label attn">Awaiting · Bash</span>
-              <span class="sub">npm test --watch</span>
+          </div>
+          <div class="notch-core"></div>
+          <div class="trail">
+            <div class="ticker">
+              <span class="count">1</span>
+              <span class="label attn">Awaiting</span>
             </div>
-            <span class="pulse wait"></span>
           </div>
         </div>
       </div>
@@ -846,8 +952,9 @@
         <div class="meta" style="padding:0 22px;">
           <div>
             <h3>Waiting — 唯一会调用赤陶 accent 的态</h3>
-            <p>主文字 “needs input” 用 <code>--accent</code>，副文字 = <code>pending_tool · pending_input</code>。
-              这是岛体能调用的最强视觉，配合脉冲环把它当作「呼叫信号」。</p>
+            <p>左段 owl 切到 wait 黄脸。右段固定 <code>{count} Awaiting</code>，状态词 <code>--accent</code> 染色 ——
+              这是岛体能调用的最强视觉。具体 <code>pending_tool / pending_input</code> 在展开层
+              （approvalCard）里展示，岛上不重复。</p>
           </div>
           <span class="tag">level 2 · accent</span>
         </div>
@@ -860,14 +967,15 @@
       <div class="menubar-strip">
         <div class="stage-caption">error</div>
         <div class="island">
-          <div class="row">
+          <div class="lead">
             <span class="spark err"></span>
-            <span class="count">1</span>
-            <div class="status-line">
-              <span class="label err">Error · Edit</span>
-              <span class="sub">settings.swift · permission denied</span>
+          </div>
+          <div class="notch-core"></div>
+          <div class="trail">
+            <div class="ticker">
+              <span class="count">1</span>
+              <span class="label err">Error</span>
             </div>
-            <span class="pulse err"></span>
           </div>
         </div>
       </div>
@@ -876,7 +984,8 @@
           <div>
             <h3>Error — 90s 衰减窗</h3>
             <p>红色态优先级最高，但仅在 <code>error_at</code> 距今 ≤ 90s 内显示；之后由 native registry 接管回落。
-              副文字 = <code>last_error</code> 截断版（最多 28 字符）。</p>
+              右段固定 <code>{count} Error</code>，状态词 red 染色；具体 <code>tool</code> 与
+              <code>last_error</code> 在展开层（sessionList 行的副文）展示。</p>
           </div>
           <span class="tag">level 3 · transient</span>
         </div>
@@ -890,10 +999,14 @@
         <div class="stage-caption">expanded · hover / long-press</div>
         <div class="island expanded">
           <div class="head">
-            <span class="spark wait"></span>
-            <span class="count">3</span>
-            <span class="cap-lbl">active · 1 awaiting</span>
-            <span class="pulse wait"></span>
+            <div class="lead">
+              <span class="spark wait"></span>
+            </div>
+            <div class="notch-core"></div>
+            <div class="trail">
+              <span class="count">3</span>
+              <span class="cap-lbl">active · 1 awaiting</span>
+            </div>
           </div>
           <div class="ss-list">
             <div class="ss">
@@ -946,10 +1059,14 @@
         <div class="stage-caption">opened · approvalCard · auto-expand</div>
         <div class="island expanded">
           <div class="head">
-            <span class="spark wait"></span>
-            <span class="count">1</span>
-            <span class="cap-lbl">permission · Bash</span>
-            <span class="pulse wait"></span>
+            <div class="lead">
+              <span class="spark wait"></span>
+            </div>
+            <div class="notch-core"></div>
+            <div class="trail">
+              <span class="count">1</span>
+              <span class="cap-lbl">permission · Bash</span>
+            </div>
           </div>
           <div class="card">
             <div class="meta-row">
@@ -986,10 +1103,14 @@
         <div class="stage-caption">opened · questionCard · auto-expand</div>
         <div class="island expanded">
           <div class="head">
-            <span class="spark wait"></span>
-            <span class="count">1</span>
-            <span class="cap-lbl">question · 3 options</span>
-            <span class="pulse wait"></span>
+            <div class="lead">
+              <span class="spark wait"></span>
+            </div>
+            <div class="notch-core"></div>
+            <div class="trail">
+              <span class="count">1</span>
+              <span class="cap-lbl">question · 3 options</span>
+            </div>
           </div>
           <div class="card">
             <div class="meta-row">
@@ -1027,10 +1148,14 @@
         <div class="stage-caption">opened · completionCard · auto-expand · 6s</div>
         <div class="island expanded">
           <div class="head">
-            <span class="spark done"></span>
-            <span class="count">1</span>
-            <span class="cap-lbl"><span style="color:var(--is-green);">done</span> · 2 min</span>
-            <span class="pulse" style="background:var(--is-green);"></span>
+            <div class="lead">
+              <span class="spark done"></span>
+            </div>
+            <div class="notch-core"></div>
+            <div class="trail">
+              <span class="count">1</span>
+              <span class="cap-lbl"><span style="color:var(--is-green);">done</span> · 2 min</span>
+            </div>
           </div>
           <div class="card completion">
             <div class="meta-row">
@@ -1115,11 +1240,19 @@
       </div>
       <div class="behave-row">
         <div class="k">Multi-display</div>
-        <div class="v">监听 <code>didChangeScreenParametersNotification</code>，仅显示在内建屏（<code>builtInScreen()</code>），外接显示器不复制。</div>
+        <div class="v">
+          监听 <code>didChangeScreenParametersNotification</code>，仅显示在内建屏，外接屏不复制。
+          切换时<b>同时重算</b>三个动态几何：<code>menuBarHeight</code> / <code>realNotchWidth</code> / 岛体居中点
+          （详见 §9 几何动态化）。
+        </div>
       </div>
       <div class="behave-row">
         <div class="k">Non-notch Macs</div>
-        <div class="v"><code>safeAreaInsets.top == 0</code> 时退化为「菜单栏下方的居中胶囊」，圆角四向均匀，无刘海留白。</div>
+        <div class="v">
+          <code>safeAreaInsets.top == 0</code> 时<b>形态完全等同刘海机型</b> —— 同一颗悬浮药丸，
+          高度仍按 <code>menuBarHeight − 2pt</code> 动态算（典型 22pt），中段 fallback 220 + 24pt 安全余量。
+          差异仅在定位算法（§9 非刘海机型行），视觉与功能无降级。
+        </div>
       </div>
     </div>
   </section>
@@ -1131,32 +1264,58 @@
     <h2>7 · 度量与排印规范</h2>
     <div class="behave">
       <div class="behave-row">
-        <div class="k">Folded size</div>
-        <div class="v"><b>250 × (notch + 24)pt</b>，idle 时收窄到 140pt；圆角 = 内容高 / 2。</div>
+        <div class="k">Closed size</div>
+        <div class="v">
+          <b>高度 = 菜单栏可视高度 − 2pt</b>（运行时算，<u>禁止硬编码</u>）。
+          实测：14"/16" MBP ≈ 36pt 岛高；M1 Air ≈ 22pt 岛高；硬编码 28pt 在刘海机型上会明显矮于 status item。
+          <u>下边缘绝不越过菜单栏底线</u>。整条宽度由内容紧凑决定 ——
+          <b>lead 46 + notch-core 动态 + trail ~70</b>，实测 14" ≈ 345pt（含 24pt 安全余量后的 notch 229pt）；
+          idle 0 会话时隐藏 trail。
+          <b>四角全圆角，radius = height / 2</b>（高度变时同步，不能写死 14pt）。
+        </div>
       </div>
       <div class="behave-row">
         <div class="k">Expanded size</div>
-        <div class="v"><b>420 × (notch + 内容)</b>，圆角 28pt；最多渲染 5 行，超出滚动。</div>
+        <div class="v">
+          <b>头部 28pt + 抽屉自适应高度</b>，<b>宽度恒等于 <code>--island-expanded-w = 480pt</code></b>
+          （<u>硬契约</u>：所有 variant 一致，<code>min-width</code> = <code>max-width</code> = 480pt，
+          内容不能撑大也不能压缩）；全圆角 18pt（略大于 closed 14pt）；
+          sessionList 最多渲染 5 行、超出滚动；超长 cap-lbl / 选项文字截断 + 省略号。
+          仅"抽屉"部分允许下探到内容区，头部仍受 closed 高度约束。
+        </div>
+      </div>
+      <div class="behave-row">
+        <div class="k">Layout 三段</div>
+        <div class="v">
+          <b>lead</b> ~48pt：仅一个 22px 彩色 owl + <b>左 16 / 右 10 非对称 padding</b>
+          （药丸左端是 full-pill 圆弧，左 padding 必须比右 padding 大 ~6pt 才能视觉居中，
+          否则 owl 看起来贴着左弧很挤）。不放脉冲点（颜色即状态）。
+          <b>notch-core</b> <u>运行时算，不硬编码</u>：
+          <code>realNotchWidth + 24pt 安全余量</code>（左右各 12pt 缓冲）；
+          实测范围 14"≈229 / 16"≈249pt；无法读取时 fallback 220pt（<b>不</b>是 180pt）。
+          <b>trail</b> ~70pt（自适应内容、定宽不弹性）：仅两 token
+          <code>{activeCount} {状态词}</code>，<u>禁止溢出/marquee/截断</u>。
+          全条总宽 = lead + 动态 notch-core + trail，因此整条胶囊在不同机型上略有差异，
+          这是<i>正确</i>行为 —— 保证 trail 永远在物理 notch 之外。
+        </div>
       </div>
       <div class="behave-row">
         <div class="k">主图标</div>
         <div class="v">
-          会换脸的猫头鹰 · <b>24×24</b> · 5 张表情来自 <code>claudedot-icons.html</code>
-          的 <code>face()</code> 配置（run 绿 / wait 黄 / err 红怒脸 / idle 炭灰 / brand 终焰陶）。
+          会换脸的猫头鹰 · <b>22×22</b>（32pt 行高内放 22px owl + 5pt 上下气口）·
+          5 张表情来自 <code>claudedot-icons.html</code> 的 <code>face()</code> 配置
+          （run 绿 / wait 黄 / err 红怒脸 / idle 炭灰 / brand 终焰陶）。
           实现层 = <code>owlImage(for:state:)</code> 按状态返回对应 <code>NSImage</code>，全彩、不染色。
         </div>
       </div>
       <div class="behave-row">
-        <div class="k">Type — count</div>
-        <div class="v">Newsreader 500 · 19pt · letter-spacing −0.3 · tabular-nums</div>
+        <div class="k">Type — count（右段首 token）</div>
+        <div class="v">Newsreader 500 · 14pt · letter-spacing −0.2 · tabular-nums · ink 色</div>
       </div>
       <div class="behave-row">
-        <div class="k">Type — status (主词)</div>
-        <div class="v">SF Pro Text 500 · 11pt · 默认 ink；waiting → accent；error → red（对齐 popover <code>.st.attn</code>）</div>
-      </div>
-      <div class="behave-row">
-        <div class="k">Type — status (副词)</div>
-        <div class="v">SF Pro Text 400 · 10.5pt · ink-2 · 单行截断 + 省略号</div>
+        <div class="k">Type — 状态词（右段尾 token）</div>
+        <div class="v">SF Pro Text 500 · 11.5pt · 默认 ink；waiting → accent；error → red
+          （对齐 popover <code>.st.attn</code>）。<u>仅 3 个字面值</u>：<code>Running / Awaiting / Error</code>（idle 无右段）</div>
       </div>
       <div class="behave-row">
         <div class="k">Type — tokens</div>
@@ -1172,7 +1331,7 @@
       </div>
       <div class="behave-row">
         <div class="k">Animation</div>
-        <div class="v">展开/收回 <code>cubic-bezier(.2,.8,.2,1)</code> 280ms · 脉冲环 1.6s ease-out 无限</div>
+        <div class="v">展开/收回 <code>cubic-bezier(.2,.8,.2,1)</code> 280ms · sessionList 行内 dot 静态光晕（无动画，简化常驻态）</div>
       </div>
     </div>
   </section>
@@ -1275,8 +1434,11 @@
       <div class="behave-row">
         <div class="k">非刘海机型</div>
         <div class="v">
-          <b>safeAreaInsets.top == 0 时</b>退化为「菜单栏正下方居中胶囊」，
-          圆角四向均匀（14pt），高度 = 28pt，宽度策略与刘海机型一致。
+          <b>safeAreaInsets.top == 0 时</b>（M1 Air、Intel Mac 等）形态<b>完全等同刘海机型</b>
+          —— 同样的 28pt 全圆角悬浮胶囊，centered 在菜单栏内。差异仅在定位算法：
+          notch 模式从 <code>screen.frame.top + safeAreaInsets.top</code> 起算的上气口；
+          fallback 从 <code>screen.frame.top + 2pt</code> 直接定位。
+          视觉与功能无降级。
         </div>
       </div>
       <div class="behave-row">
@@ -1337,6 +1499,199 @@
           下次启动也不显示；偏好与菜单栏 owl 完全独立。
         </div>
       </div>
+
+      <div class="behave-row">
+        <div class="k">菜单栏自动隐藏</div>
+        <div class="v">
+          系统偏好 "Automatically hide and show the menu bar" 开启时菜单栏会上滑消失。
+          监听 <code>NSWorkspace.shared.notificationCenter</code> 的菜单栏可见性通知 +
+          <code>NSStatusBar.isVisible</code>；菜单栏不可见时 <code>orderOut</code>，
+          重现时下一 tick 自动 <code>orderFrontRegardless</code>。<u>不</u>跟随菜单栏滑动动画
+          —— 直接隐/显，避免追帧抖动。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">多 Space / 桌面切换</div>
+        <div class="v">
+          NSPanel 的 <code>collectionBehavior</code> = <code>[.canJoinAllSpaces, .stationary, .ignoresCycle]</code>
+          —— 岛体在所有 Space 都可见，但不参与 ⌘Tab 循环。
+          Mission Control 激活时 macOS 会自动隐藏 status item 类窗口；岛体跟随系统行为，不主动干预。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">Stage Manager / 全屏沉浸</div>
+        <div class="v">
+          Stage Manager 激活时左侧卡片区可能与岛体重叠。岛体 <code>level = .statusBar</code>
+          保证位于其上层；Stage Manager 自动隐藏菜单栏时遵循上面的"菜单栏自动隐藏"行为。
+          视频全屏 / Keynote 演示前置时复用"全屏应用"分支 <code>orderOut</code>。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">Game Mode（macOS 14+）</div>
+        <div class="v">
+          系统 Game Mode 开启时 macOS 自动抢占菜单栏 + 隐藏所有 status item。
+          监听 <code>NSWorkspace.didActivateApplicationNotification</code> 中 game-mode 进程；
+          检测到时 <code>orderOut</code>，退出后恢复。<u>不</u>尝试覆盖系统的优先级（无意义且违规）。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">count 上限</div>
+        <div class="v">
+          <code>activeCount ≥ 100</code> 时显示 <b>"99+"</b>（serif，保持 tabular 等宽）。
+          理论极限：trail 区禁止溢出（§7），所以 count token 字符数 ≤ 3 是硬约束。
+          实际操作系统中同时跑 100+ 个 Claude session 极少见，但需要兜底防排版破相。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">状态文件并发写</div>
+        <div class="v">
+          多 session 同时触发 hook → 并发写 <code>~/.claude/statusbar/sessions/&lt;sid&gt;.json</code>。
+          <b>必须 atomic</b>：写到 <code>&lt;sid&gt;.json.tmp.&lt;pid&gt;</code> + <code>rename(2)</code>。
+          岛体的 reader 用 <code>O_NONBLOCK</code> 读，遇到 EOF/truncated 当作"上一帧仍有效"忽略本次，
+          不显示半边状态。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">时钟基准（90s error 衰减）</div>
+        <div class="v">
+          NTP 校时、夏令时切换、用户手动改时间都可能让 <code>Date()</code> 跳变 ± 小时级别。
+          <code>error_at</code> 衰减<b>必须用 monotonic 时钟</b>
+          （<code>CFAbsoluteTime</code> 或 <code>mach_absolute_time</code>），<u>不</u>用 wall clock，
+          否则一次校时可能把红脸卡死或瞬间过期。hook 端写入 <code>error_at</code> 时同时记一份
+          <code>error_at_mono</code> 单调时间，reader 用单调差值判定衰减。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">进程僵尸 / 失活</div>
+        <div class="v">
+          <code>kill(pid, 0) == 0</code> 仅说明 pid 表项存在，可能是 zombie / SIGSTOP'd。
+          补充判定：<code>ps -o stat= -p &lt;pid&gt;</code> 状态字符含 <code>Z</code>（zombie）或
+          连续 3 tick 文件 mtime 不变且 status == busy → 视为失活，从聚合移除。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">状态翻转防抖</div>
+        <div class="v">
+          单 session 在 PreToolUse → PostToolUse 之间会快速从 running → waiting → running 翻转，
+          肉眼看就是闪烁。聚合状态升级（→ waiting）<b>立即生效</b>（不阻塞用户响应），
+          降级（waiting → running / running → idle）需<b>稳定 600ms 才生效</b>，
+          通过 <code>SessionVM</code> 一层 debounce 实现。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">冷启动批量 sessions</div>
+        <div class="v">
+          app 启动时 <code>~/.claude/sessions/</code> 可能已有 20+ 个 pid 文件。
+          首帧<b>同步</b>扫一遍（≤ 50ms），先以聚合状态绘制；后台异步算逐 session token 等次要数据。
+          决不让 UI 出现 200ms 以上的 "0 sessions" 错误中间态。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">Owl glyph 加载失败</div>
+        <div class="v">
+          打包的 5 张 PNG 缺失或解码失败时，fallback 到 <code>Status.emoji</code>
+          （headless 也用的同套）：⚪ idle · 🟢 run · 🟡 wait · 🔴 err。
+          字符渲染优于空白圆角矩形；不抛 assertion。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">运行时主题切换</div>
+        <div class="v">
+          岛体始终纯黑，<b>不</b>跟随 <code>NSApp.effectiveAppearance</code> 切换。
+          仅展开抽屉里的 sessionList / cards 使用 <code>Theme.dark</code> 一套色，
+          系统外观切换时只重绘抽屉、不动药丸本身，避免黑色变灰这种诡异过渡。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">Reduced Motion / Increased Contrast</div>
+        <div class="v">
+          <code>NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == true</code> 时
+          关闭展开/收回弹性动画（直接淡入淡出 120ms）。
+          <code>shouldIncreaseContrast</code> 时把 ink-2 / ink-3 提到 ink-1，状态词加粗到 600。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">物理 notch 几何兜底</div>
+        <div class="v">
+          <code>safeAreaInsets.top</code> 在某些 macOS 升级 / 外接屏断连瞬间可能返回 0 或错值。
+          缓存上次成功的 inset 值；连续 5 tick 异常时回退到"非刘海机型"分支，并写一条
+          warning 到 <code>~/.claude/statusbar/log</code>。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">菜单栏高度差异（实机 bug）</div>
+        <div class="v">
+          <b>已观测 bug：</b>硬编码 <code>islandHeight = 28pt</code> 时，14"/16" MBP 上菜单栏实际 ≈ 38pt
+          → 岛体明显矮于旁边的微信、电池等 status item，视觉违和（截图证据：胶囊上下各空一截）。
+          <b>修法：</b>岛高必须从 <code>NSScreen</code> 推导：<br>
+          <code>1) safeAreaInsets.top &gt; 0（刘海机型）→ menuBarHeight = safeAreaInsets.top（含刘海留白即菜单栏高）</code><br>
+          <code>2) frame.height − visibleFrame.height（非刘海机型，dock 在底时即菜单栏高）</code><br>
+          <code>3) 兜底 NSStatusBar.system.thickness + 2 ≈ 24pt</code><br>
+          <b>islandHeight = menuBarHeight − 2pt</b>（上下各 1pt 气口），
+          <b>islandRadius = islandHeight / 2</b>（同步重算）。
+          <code>NSWorkspace.didChangeScreenParametersNotification</code> 触发时重算。
+          <b>验收：</b>岛体与旁边 status item 视觉等高，胶囊圆度保持 full-pill（高度变时圆角同步）。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">notch 宽度差异（实机 bug）</div>
+        <div class="v">
+          <b>已观测 bug：</b>硬编码 <code>notchCoreWidth = 180pt</code> 时，14"/16" MBP 上物理 notch
+          实际占 205-225pt → trail 首 token（数字 <code>{count}</code>）落入物理 notch 范围被遮挡，
+          肉眼看就是 <code>"5 Awaiting"</code> 只剩 <code>"Awaiting"</code>。
+          <b>修法：</b>notch-core 宽度必须从
+          <code>NSScreen.auxiliaryTopLeftArea / auxiliaryTopRightArea</code> 推导
+          （= 屏宽 − 左侧菜单可用区右边界 − 右侧状态项区左边界），
+          再左右各加 <b>12pt 安全余量</b>（避开 notch 的边缘半透明渐变）。
+          无 API 可用时 fallback = <b>220pt</b>（覆盖最宽 16" notch），
+          <u>不</u>是 180pt。
+          <b>验收：</b>14"/16" MBP 上 trail 的 count 字符完全可见、不被 notch 蹭到任何像素。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">隐私 — 屏幕录制 / 投屏</div>
+        <div class="v">
+          <code>CGDisplayStream</code> 活跃（被录屏 / AirPlay / 投屏）时不主动隐藏，
+          但<b>右段状态词降级</b>到通用 <code>"Active"</code>（不暴露 Error/Awaiting/Running 这种
+          可能透露工作内容的词），sessionList 展开时<b>不</b>显示 cwd 与具体 prompt。
+          这是 §8 Privacy 行的运行时补充。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">磁盘满 / HOME 只读</div>
+        <div class="v">
+          hook 写入失败时<b>静默丢弃本次状态</b>（exit 0），不阻塞 Claude。
+          岛体读取失败（EACCES / ENOSPC）时退化为 idle 并显示 ink-3 toast
+          一次："状态目录不可写"，链接到 popover 设置 → 重选目录或禁用。
+        </div>
+      </div>
+
+      <div class="behave-row">
+        <div class="k">触控板 / 系统手势透传</div>
+        <div class="v">
+          岛体 NSPanel <code>ignoresMouseEvents</code> 区域 = lead + notch-core 上半 14pt
+          （上半属于"伪 notch"，传统上 macOS 上滑手势触发 Mission Control 应该可用）。
+          仅 trail + 抽屉处理鼠标事件。三指上滑等手势不被岛体吃掉。
+        </div>
+      </div>
+
       <div class="behave-row">
         <div class="k">非目标（再次明确）</div>
         <div class="v">
@@ -1360,13 +1715,14 @@
       <div class="prio-row">
         <div class="lvl">AC-1</div>
         <div class="state">功能</div>
-        <div>启动后岛体常驻在内建屏刘海周围，无需任何点击。</div>
-        <div><code>snapshot 模式截图</code></div>
+        <div>启动后岛体作为<b>悬浮全圆角药丸</b>常驻在内建屏菜单栏内（包裹物理 notch），无需任何点击。</div>
+        <div><code>--snapshot-island 模式截图</code></div>
       </div>
       <div class="prio-row">
         <div class="lvl">AC-2</div>
         <div class="state">功能</div>
-        <div>0 会话 → idle 折叠；1+ 非 idle 会话 → 显示 count + 优先级最高文案。</div>
+        <div>0 会话 → idle 隐藏右段；1+ 非 idle 会话 → 右段显示 <code>{count} {状态词}</code>
+          两 token，状态词按 §3 优先级。</div>
         <div><code>demoData() 注入</code></div>
       </div>
       <div class="prio-row">
@@ -1390,7 +1746,8 @@
       <div class="prio-row">
         <div class="lvl">AC-6</div>
         <div class="state">兼容</div>
-        <div>非刘海 Mac 上退化为菜单栏下胶囊，不破相。</div>
+        <div>非刘海 Mac 上形态<b>完全等同</b>刘海机型 —— 同一颗悬浮药丸，
+          高度按 <code>menuBarHeight − 2pt</code> 动态算，无视觉降级。</div>
         <div><code>M1 Air 真机验证</code></div>
       </div>
       <div class="prio-row">
@@ -1441,12 +1798,48 @@
         <div>kill 掉岛体进程后，hook 仍然 0 退出码、popover 仍能打开、agent 不受影响。</div>
         <div><code>fail-open 杀进程测试</code></div>
       </div>
+      <div class="prio-row">
+        <div class="lvl">AC-15</div>
+        <div class="state">几何</div>
+        <div>岛体高度<b>动态等于</b> <code>menuBarHeight − 2pt</code>，与旁边 status item（微信、电池、时钟）
+          视觉等高同行；任何机型下圆角 = <code>height / 2</code> 保持 full-pill。</div>
+        <div><code>14"/16" MBP + M1 Air 三机验证 · 像素尺测</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-16</div>
+        <div class="state">几何</div>
+        <div>右段首 token（数字）在 14"/16" MBP 上完全可见，不被物理 notch 蹭到任何像素。
+          <code>notchCoreWidth</code> 从 <code>NSScreen.auxiliaryTopLeftArea/Right</code> 推导 + 24pt 安全余量。</div>
+        <div><code>5 Awaiting / 12 Error 渲染验证</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-17</div>
+        <div class="state">几何</div>
+        <div>外接屏接入 / 断开 / 切主屏后，<code>menuBarHeight</code> / <code>realNotchWidth</code> / 居中点
+          自动重算，无需重启 app。</div>
+        <div><code>didChangeScreenParameters 触发测</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-18</div>
+        <div class="state">视觉</div>
+        <div>左段 owl 视觉居中过药丸左圆弧（左 padding 16 / 右 10 非对称），4 种状态色
+          （灰/绿/黄/红 owl）下都不"贴左弧"。</div>
+        <div><code>4 状态截图人眼复核</code></div>
+      </div>
+      <div class="prio-row">
+        <div class="lvl">AC-19</div>
+        <div class="state">几何</div>
+        <div>展开态宽度恒等于 <code>--island-expanded-w = 480pt</code>，所有 4 个 variant
+          （sessionList / approvalCard / questionCard / completionCard）宽度一致，
+          长 cap-lbl / 选项截断而非加宽。</div>
+        <div><code>variant 切换测，断言 panel.frame.width == 480</code></div>
+      </div>
     </div>
   </section>
 
   <footer>
-    <span>Claude Dot · Dynamic Island Requirements <b>v0.3</b></span>
-    <span>2026-06-02 · inspired by Octane0411/open-vibe-island · matches DESIGN.md</span>
+    <span>Claude Dot · Dynamic Island Requirements <b>v0.4</b></span>
+    <span>2026-06-03 · 悬浮全圆角药丸 · 几何动态化 · 480pt 硬契约 · 匹配 DESIGN.md</span>
   </footer>
 </div>
 

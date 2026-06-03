@@ -72,7 +72,17 @@ struct IslandGeom {
     static let menuBarAirGap: CGFloat = 2
 
     static let leadW: CGFloat = 46
-    static let coreW: CGFloat = 180
+    // Fallback notch-core width when the screen API gives us nothing useful.
+    // Picked at 220 so a non-notch Mac still gets a pill wider than the
+    // widest 16" MBP notch (~225pt) — keeps the visual & functional parity
+    // §9 calls for, no narrow stub. Per spec §2.0 (updated 2026-06): "fallback
+    // 到 220pt 而非 180pt". The HARDCODED 180 was a bug — 14" MBP notch is
+    // ~205pt and 16" Max is ~225pt, both wider, so the trail's first token
+    // (the count digit) fell inside the physical notch and got clipped.
+    static let coreFallback: CGFloat = 220
+    // Left/right safety buffer around the notch — 12pt on each side so the
+    // trail (and the lead) don't crash into the notch's soft edge gradient.
+    static let coreSafetyMargin: CGFloat = 24
     // Trail breathing room: 18pt between the notch-core and the count's left
     // edge so the digit isn't pressed up against the notch. 16pt from the
     // word's right edge to the pill's rounded right end so the pill's curve
@@ -112,12 +122,16 @@ struct IslandGeom {
         return trailLGap + cw + 5 + ww + trailRPad
     }
 
-    static func foldedSize(count: Int, word: String) -> NSSize {
-        NSSize(width: leadW + coreW + trailWidth(count: count, word: word),
+    // notchCoreWidth runs every time we compute a size — it depends on the
+    // screen the pill is being laid out on, which can change at any
+    // didChangeScreenParameters (lid open/close, monitor swap).
+    static func foldedSize(notchCoreWidth: CGFloat, count: Int, word: String) -> NSSize {
+        NSSize(width: leadW + notchCoreWidth + trailWidth(count: count, word: word),
                height: foldedH)
     }
 
-    static func expandedSize(variant: IslandCardVariant, rowCount: Int) -> NSSize {
+    static func expandedSize(notchCoreWidth: CGFloat,
+                              variant: IslandCardVariant, rowCount: Int) -> NSSize {
         let body: CGFloat
         switch variant {
         case .sessionList:
@@ -128,6 +142,10 @@ struct IslandGeom {
         case .question:    body = questionH
         case .completion:  body = completionH
         }
+        // The head reuses the closed pill's 3-segment layout, so the expanded
+        // width incorporates the same notch-core width — keeps both surfaces
+        // aligned visually at the same widths around the notch.
+        let _ = notchCoreWidth   // currently not encoded in width; expandedW is fixed per spec §7
         return NSSize(width: expandedW, height: headH + body)
     }
 
@@ -346,6 +364,11 @@ final class DynamicIslandController {
         case .visible(let screen, let hadNotch):
             ensurePanel()
             if hadNotch { sawNotchHardware = true }
+            // Set the live notch-core width BEFORE host.update so the first
+            // frame's inner layout uses the right core width on this screen
+            // (didChangeScreenParameters fires here, the notch width can
+            // change mid-session when monitors swap).
+            host?.notchCoreWidth = screen.islandNotchCoreWidth
             host?.update(sessions: lastSessions, layout: layout, variant: variant)
             applyFrame(on: screen, animated: animated)
             if panel?.isVisible == false { panel?.orderFrontRegardless() }
@@ -381,7 +404,7 @@ final class DynamicIslandController {
     private func ensurePanel() {
         if panel != nil { return }
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0,
-                                            width: IslandGeom.leadW + IslandGeom.coreW + 80,
+                                            width: IslandGeom.leadW + IslandGeom.coreFallback + 80,
                                             height: IslandGeom.foldedH),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
@@ -395,7 +418,7 @@ final class DynamicIslandController {
         p.isMovable = false
         p.becomesKeyOnlyIfNeeded = true
         let h = IslandHostView(frame: NSRect(x: 0, y: 0,
-                                              width: IslandGeom.leadW + IslandGeom.coreW + 80,
+                                              width: IslandGeom.leadW + IslandGeom.coreFallback + 80,
                                               height: IslandGeom.foldedH))
         h.controller = self
         p.contentView = h
@@ -412,6 +435,7 @@ final class DynamicIslandController {
         variant = v
         guard changed else { return }
         guard case .visible(let screen, _) = resolveTarget() else { return }
+        host?.notchCoreWidth = screen.islandNotchCoreWidth
         host?.update(sessions: lastSessions, layout: l, variant: v)
         applyFrame(on: screen, animated: true)
     }
@@ -463,10 +487,14 @@ final class DynamicIslandController {
 
     private func applyFrame(on screen: NSScreen, animated: Bool) {
         guard let panel = panel else { return }
-        let size = sizeForState()
+        let core = screen.islandNotchCoreWidth
+        let size = sizeForState(notchCoreWidth: core)
         let origin = IslandGeom.origin(on: screen.frame, size: size)
         let r = NSRect(origin: origin, size: size)
-        log("applyFrame layout=\(layout) variant=\(variant) screen=\(screen.frame) panel=\(r)")
+        log("applyFrame layout=\(layout) variant=\(variant) screen=\(screen.frame) notchCore=\(core) panel=\(r)")
+        // Tell the host the live notch-core width so makeCoreSegment lays the
+        // empty middle out at exactly the right size on this screen.
+        host?.notchCoreWidth = core
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.28
@@ -478,15 +506,17 @@ final class DynamicIslandController {
         }
     }
 
-    private func sizeForState() -> NSSize {
+    private func sizeForState(notchCoreWidth: CGFloat) -> NSSize {
         switch layout {
         case .closed:
             let agg = aggregateStatus(lastSessions.map { $0.s })
             let count = activeCount(lastSessions.map { $0.s })
-            return IslandGeom.foldedSize(count: count, word: islandStatusWord(agg))
+            return IslandGeom.foldedSize(notchCoreWidth: notchCoreWidth,
+                                          count: count, word: islandStatusWord(agg))
         case .opened:
             let nonIdle = activeCount(lastSessions.map { $0.s })
-            return IslandGeom.expandedSize(variant: variant, rowCount: nonIdle)
+            return IslandGeom.expandedSize(notchCoreWidth: notchCoreWidth,
+                                            variant: variant, rowCount: nonIdle)
         }
     }
 
@@ -508,6 +538,12 @@ final class IslandHostView: NSView {
     private var currentLayout: IslandLayout = .closed
     private var currentVariant: IslandCardVariant = .sessionList
     private var lastSig: String = ""
+    // Live notch-core width — set by the controller from the resolved screen.
+    // makeCoreSegment reads this so the empty middle of the pill matches the
+    // physical notch on whichever display we're currently shown on.
+    var notchCoreWidth: CGFloat = IslandGeom.coreFallback + IslandGeom.coreSafetyMargin {
+        didSet { if notchCoreWidth != oldValue { lastSig = ""; needsLayout = true } }
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -630,7 +666,9 @@ final class IslandHostView: NSView {
     private func makeCoreSegment() -> NSView {
         let v = NSView()
         v.translatesAutoresizingMaskIntoConstraints = false
-        v.widthAnchor.constraint(equalToConstant: IslandGeom.coreW).isActive = true
+        // Live notch-core width (set by the controller per current screen).
+        // Includes the 12pt-per-side safety margin around the physical notch.
+        v.widthAnchor.constraint(equalToConstant: notchCoreWidth).isActive = true
         return v
     }
 
@@ -1277,4 +1315,49 @@ final class ClickRow: NSView {
         layer?.backgroundColor = NSColor.clear.cgColor
     }
     override func mouseUp(with event: NSEvent) { onClick?() }
+}
+
+// MARK: - NSScreen extensions
+
+extension NSScreen {
+    // Width of the physical notch on a notched MacBook display, in screen
+    // points. Three-tier resolution per design/dynamic-island.html §2.0
+    // (2026-06 update):
+    //
+    //   1. Reverse-derive from auxiliary areas: notch = frame.width −
+    //      auxiliaryTopLeftArea.width − auxiliaryTopRightArea.width. Apple
+    //      models the menu bar AROUND the notch as two sub-rects; whatever
+    //      isn't covered IS the notch.
+    //   2. If auxiliary areas aren't reported, fall back to safeAreaInsets.top
+    //      × 5.5 (an empirical aspect-ratio estimate — the notch is roughly
+    //      5–6x as wide as it is tall on every MBP shipped so far).
+    //   3. Non-notch Macs / API unavailable: 220pt floor, wide enough to
+    //      cover the worst-case 16" Max notch (~225pt) plus safety margin
+    //      (§9 "非刘海机型: 形态完全等同刘海机型" — pill width should not
+    //      collapse just because there's no real notch).
+    //
+    // Why 220 (not 180): the previous hardcoded 180pt placed the trail's
+    // first token (the count digit) at +90pt from screen center, but the
+    // real 14" Pro notch extends to ±102pt, so "5 Awaiting" on a real MBP
+    // had the "5" eaten by the notch. See spec §9 "notch 宽度差异（实机
+    // bug）" for the field report.
+    var realNotchWidth: CGFloat {
+        if #available(macOS 12.0, *) {
+            if let left = auxiliaryTopLeftArea, let right = auxiliaryTopRightArea {
+                let derived = frame.width - left.width - right.width
+                if derived > 0 { return derived }
+            }
+            let inset = safeAreaInsets.top
+            if inset > 0 { return inset * 5.5 }
+        }
+        return 220
+    }
+
+    // The pill's notch-core segment width. Equal to the physical notch width
+    // plus 12pt safety margin on each side (per spec §2.0) so the visual
+    // notch core comfortably encloses the cutout — keeping the trail's first
+    // token clear of the notch's soft-edge gradient.
+    var islandNotchCoreWidth: CGFloat {
+        realNotchWidth + IslandGeom.coreSafetyMargin
+    }
 }

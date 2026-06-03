@@ -19,3 +19,4 @@ DerivedData/
 
 # Claude Code local tooling (preview servers, etc.)
 .claude/
+dist/

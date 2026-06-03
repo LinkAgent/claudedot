@@ -18,6 +18,10 @@ state under `~/.claude`, and does not make API calls.
 ## Features
 
 - Live menu-bar state for all running Claude Code sessions.
+- **Dynamic Island** floating in the menu bar — a black capsule that hugs the
+  physical notch and shows the highest-priority state + active count at a
+  glance, expanding on hover to a per-session list and on hook events to
+  contextual cards.
 - Popover with current-session usage, today's transcript-derived token totals,
   session rows, status text, and cumulative tokens.
 - Pending approval panel showing the tool and command/URL captured by hooks.
@@ -46,6 +50,80 @@ The menu-bar icon is a square face. Its color is the aggregate state:
 `running` decays to `idle` in the aggregate after 90 seconds without a fresh
 update. Error state remains visible while recent enough to matter, then native
 session recovery wins.
+
+## Dynamic Island
+
+A black floating capsule that lives inside the menu bar, wrapping the physical
+notch (or sitting centered on non-notch Macs). It surfaces the most important
+status without you having to click anything.
+
+<p align="center">
+  <img src="docs/screenshot-island.png" width="640" alt="Dynamic Island states: idle, running, awaiting, error, expanded sessionList, approvalCard, completionCard">
+</p>
+
+### Closed state (resting)
+
+A three-segment pill: colored owl on the left, physical-notch placeholder in
+the middle, and a compact `{count} {state word}` token on the right.
+
+| State | Right segment | Use the count to know |
+| --- | --- | --- |
+| `error` | `N Error` (red) | How many sessions have a recent failure |
+| `waiting` | `N Awaiting` (accent) | How many sessions are blocked on approval/input |
+| `running` | `N Running` (ink) | How many sessions are currently working |
+| `idle` | hidden | No active sessions; the pill collapses to just the owl |
+
+The owl glyph color *is* the state — there is no separate pulse dot, since the
+glyph carries that information already. Priority is strictly `error > waiting
+> running > idle`; only the highest-priority state's count is shown.
+
+### Expanded state (on hover / on event)
+
+Hovering for ≥ 180 ms drops a 480 pt-wide drawer below the pill listing every
+non-idle session, with status dot, title, current tool, and cumulative tokens.
+Clicking a row calls the same `jump(pid:cwd:)` the popover uses, so you land
+in the exact terminal tab that needs you.
+
+Hook events auto-expand into purpose-built cards:
+
+| Hook event | Card | Auto-collapse |
+| --- | --- | --- |
+| `PreToolUse` | `approvalCard` — tool name, command/URL preview, *Jump to terminal* | 12 s |
+| `UserPromptSubmit` / `Notification` | `questionCard` — question text, option preview, *Jump to terminal* | 12 s |
+| `Stop` | `completionCard` — task summary, tokens, runtime, *Jump to session* | 6 s |
+
+The island **never** answers a permission prompt on your behalf. It surfaces
+the prompt and jumps you to the terminal where Claude Code is waiting.
+
+### Geometry is fully dynamic
+
+Every layout constant is derived from `NSScreen` at runtime — no hardcoded
+pixel values — and recomputed on
+`NSApplication.didChangeScreenParametersNotification` when you connect or
+disconnect an external display:
+
+- **Height** = `menuBarHeight − 2 pt`, so the pill sits at the same height as
+  adjacent status items (battery, clock, third-party menu apps) on every
+  machine — 14"/16" MBP, M1 Air, Intel Mac alike.
+- **Notch-core width** = `realNotchWidth + 24 pt` safety margin, pulled from
+  `NSScreen.auxiliaryTopLeftArea / auxiliaryTopRightArea`, so the right-side
+  count never falls behind the physical notch.
+- **Corner radius** = `height / 2`, so the pill stays a true full-pill capsule
+  at any height.
+- **Expanded width** is the one fixed value: a hard contract of 480 pt for
+  every variant, enforced via `min-width = max-width`.
+
+The full requirement spec lives in
+[`design/dynamic-island.html`](design/dynamic-island.html) and tracks 13+
+boundary cases (menu-bar auto-hide, Stage Manager, Game Mode, screen
+recording, process zombies, atomic state writes, monotonic clock for the 90 s
+error decay, and more).
+
+### Disabling
+
+Toggle it off in the popover footer if you only want the menu-bar owl. The
+preference is persisted to `UserDefaults` and is independent of the menu-bar
+icon and the popover — disabling one does not affect the other.
 
 ## How It Works
 
@@ -220,11 +298,15 @@ Render preview images from the built binary:
 ```bash
 BIN=build/claudedot.app/Contents/MacOS/claudedot
 
-"$BIN" --snapshot out.png
-"$BIN" --snapshot out.png --real
-"$BIN" --owls docs/screenshot-states.png
-"$BIN" --appicon /tmp/claudedot-appicon.png
+"$BIN" --snapshot out.png                        # popover (light + dark, demo data)
+"$BIN" --snapshot out.png --real                 # popover with live session data
+"$BIN" --snapshot-island docs/screenshot-island.png  # Dynamic Island: closed × 4 + expanded variants
+"$BIN" --owls docs/screenshot-states.png         # menu-bar owl glyph states
+"$BIN" --appicon /tmp/claudedot-appicon.png      # app icon
 ```
+
+All snapshot modes render offscreen via `NSView.cacheDisplay`, so no Screen
+Recording permission is needed.
 
 Preview the icon design source directly:
 
@@ -260,6 +342,8 @@ test code must live in a file named `main.swift`, then compiles it with
 | --- | --- |
 | `app/Sources/Model.swift` | Pure model, status mapping, merge logic, aggregation, token helpers. No AppKit. |
 | `app/Sources/main.swift` | AppKit app, menu-bar item, popover, data loading, usage parsing, jump-to-session, snapshot modes. |
+| `app/Sources/DynamicIsland.swift` | Dynamic Island controller — `NSScreen`-derived geometry, three-segment pill, hover & event-driven expanded variants. |
+| `design/dynamic-island.html` | Dynamic Island requirement spec (v0.4) — form factor, geometry, boundary cases, acceptance criteria. |
 | `hook/cc_statusbar_hook.py` | Claude Code hook dispatcher. Writes per-session JSON state. |
 | `hook/cc_usage_probe.py` | Drives Claude Code `/status` in a pseudo-terminal and writes `usage.json`. |
 | `install_hooks.py` | Idempotent merge/removal for `~/.claude/settings.json` hooks. |
@@ -360,7 +444,12 @@ terminal where the prompt is waiting.
 - Headless `claude -p` sessions may not appear in the native registry; recent
   active hook-only sessions are shown briefly.
 - Live menu-bar screenshots can require macOS Screen Recording permission. Use
-  `--snapshot`, `--owls`, and `--appicon` for offscreen previews.
+  `--snapshot`, `--snapshot-island`, `--owls`, and `--appicon` for offscreen
+  previews.
+- The Dynamic Island is rendered on the built-in display only — it is not
+  mirrored to external monitors. Connecting or disconnecting an external
+  display triggers a geometry recompute (height, notch-core width, centering)
+  without restarting the app.
 
 ## License
 

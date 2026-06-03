@@ -1506,7 +1506,20 @@ func renderIslandSnapshot(to path: String) {
         let (view, sz) = host(for: cell.vms, layout: cell.layout, variant: cell.variant)
         let islandX = bg.midX - sz.width / 2
         let islandY = bg.maxY - IslandGeom.airGap - sz.height
-        let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        // Caching needs an explicit alpha-aware bitmap rep so the pill's rounded
+        // corners come through as transparent. bitmapImageRepForCachingDisplay
+        // (the default) produces an opaque bitmap → the 4 corner pixels outside
+        // the rounded shape would render as white over the wallpaper.
+        let pixW = Int(view.bounds.width * 2)
+        let pixH = Int(view.bounds.height * 2)
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixW, pixelsHigh: pixH,
+            bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = view.bounds.size
         view.cacheDisplay(in: view.bounds, to: rep)
         rep.draw(in: NSRect(x: islandX, y: islandY, width: sz.width, height: sz.height))
 

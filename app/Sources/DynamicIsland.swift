@@ -51,33 +51,38 @@ enum IslandCardVariant: Equatable {
 }
 
 // Geometry constants — pure so the snapshot renderer and unit tests can use
-// them without standing up an NSPanel. v0.3 contract (§7 of the spec).
+// them without standing up an NSPanel. v0.3 contract (§7 of the spec + the
+// HTML mock which the prose §2.0 has to be reconciled with).
+//
+// Vertical layout:
+//   ┌────────────────────────────────────────────────┐ ← top edge at screen.maxY
+//   │       notch halo (≈ safeAreaInsets.top)        │   on a notch Mac, this
+//   │     — invisible behind hardware notch —        │   region is eaten by the
+//   ├────────────────────────────────────────────────┤   notch cutout, leaving
+//   │                                                │
+//   │     content strip (contentH = 28pt)            │   only the bottom strip
+//   │  ┌──────┬──────────────────┬──────────────┐    │   visible BELOW the
+//   │  │ lead │   notch-core     │    trail     │    │   menu bar / notch.
+//   │  │ owl  │   (180pt empty)  │ {count} word │    │
+//   │  └──────┴──────────────────┴──────────────┘    │   On non-notch Macs the
+//   │                                                │   halo is 0, pill is
+//   └────────────────────────────────────────────────┘   just the content strip
+//                                                        and floats in the menu
+//                                                        bar with a 2pt gap.
 struct IslandGeom {
-    // Closed pill: a true 28pt-tall capsule that floats INSIDE the menu bar
-    // with 2pt air gaps top/bottom. Three horizontal segments side-by-side.
-    static let foldedH: CGFloat = 28
+    // Content strip — the part below the notch / menu bar that actually shows
+    // the owl + count + word. All glyphs are vertically centered in this.
+    static let contentH: CGFloat = 28
     static let menuBarAirGap: CGFloat = 2
 
-    // Lead segment: holds the 22×22 owl glyph with 12pt L padding + a small
-    // trailing gap before the notch-core.
     static let leadW: CGFloat = 46
-    // Notch-core: empty horizontal segment that visually IS the notch. Width
-    // matches the typical notch (~180pt) on 14"/16" MBPs — the notch sits
-    // INSIDE the pill horizontally so the pill's lead + trail show to its
-    // left and right.
     static let coreW: CGFloat = 180
-    // Trail segment: `{count} {Word}` with 14pt R padding. Width comes from
-    // measuring the text — see trailWidth(...). Idle hides this segment.
     static let trailRPad: CGFloat = 14
-    // Closed pill corner radius — full pill (height / 2).
     static let closedRadius: CGFloat = 14
-    // Expanded pill radius — slightly larger to mark the surface as different.
     static let openedRadius: CGFloat = 18
 
-    // Expanded panel: 480pt FIXED width across all variants. Head reuses the
-    // closed 28pt strip; drawer hangs below.
     static let expandedW: CGFloat = 480
-    static let headH: CGFloat = foldedH
+    static let headH: CGFloat = contentH
     static let listVPad: CGFloat = 6
     static let footH: CGFloat = 24
     static let rowH: CGFloat = 38
@@ -87,25 +92,26 @@ struct IslandGeom {
     static let completionH: CGFloat = 116
     static let maxRows: Int = 5
 
-    // Compute the trail width given the visible count + word. Caches a
-    // measuring NSTextField per (count, word) pair would be premature — we
-    // re-measure each tick (cheap; ≤ 1µs).
+    // Halo over the notch. 0 on non-notch Macs.
+    static func notchInset(safeAreaTop: CGFloat) -> CGFloat { safeAreaTop }
+
     static func trailWidth(count: Int, word: String) -> CGFloat {
         guard !word.isEmpty, count > 0 else { return 0 }
         let countText = count >= 100 ? "99+" : "\(count)"
         let str = NSAttributedString(string: "\(countText) \(word)", attributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .medium),
         ])
-        // 14pt R pad + small leading gap from the notch-core.
         return ceil(str.size().width) + trailRPad + 6
     }
 
-    static func foldedSize(count: Int, word: String) -> NSSize {
+    static func foldedSize(safeAreaTop: CGFloat, count: Int, word: String) -> NSSize {
         let trail = trailWidth(count: count, word: word)
-        return NSSize(width: leadW + coreW + trail, height: foldedH)
+        return NSSize(width: leadW + coreW + trail,
+                      height: notchInset(safeAreaTop: safeAreaTop) + contentH)
     }
 
-    static func expandedSize(variant: IslandCardVariant, rowCount: Int) -> NSSize {
+    static func expandedSize(safeAreaTop: CGFloat,
+                              variant: IslandCardVariant, rowCount: Int) -> NSSize {
         let body: CGFloat
         switch variant {
         case .sessionList:
@@ -116,16 +122,18 @@ struct IslandGeom {
         case .question:    body = questionH
         case .completion:  body = completionH
         }
-        return NSSize(width: expandedW, height: headH + body)
+        return NSSize(width: expandedW,
+                      height: notchInset(safeAreaTop: safeAreaTop) + headH + body)
     }
 
-    // Y origin: the pill sits with its top edge 2pt below the screen top edge,
-    // INSIDE the menu bar's 32pt strip. Identical for notch and non-notch
-    // Macs — the visual difference is whether a hardware notch occludes the
-    // notch-core segment in the middle (§9 of the spec).
-    static func origin(on screenFrame: NSRect, size: NSSize) -> NSPoint {
+    // Y origin: notch Mac → top edge AT screen.maxY (pill extends from screen
+    // top down; the notch eats the halo). Non-notch Mac → 2pt below screen top
+    // so the pill floats inside the menu bar with breathing room.
+    static func origin(on screenFrame: NSRect, size: NSSize, hasNotch: Bool) -> NSPoint {
         let x = screenFrame.midX - size.width / 2
-        let y = screenFrame.maxY - menuBarAirGap - size.height
+        let y: CGFloat = hasNotch
+            ? screenFrame.maxY - size.height
+            : screenFrame.maxY - menuBarAirGap - size.height
         return NSPoint(x: x, y: y)
     }
 }
@@ -331,18 +339,19 @@ final class DynamicIslandController {
         case .hidden:
             panel?.orderOut(nil)
             log("hidden")
-        case .visible(let screen):
+        case .visible(let screen, let safeAreaTop, let hasNotch):
             ensurePanel()
-            if hasNotchHardware(screen) { sawNotchHardware = true }
+            if hasNotch { sawNotchHardware = true }
+            host?.topInset = IslandGeom.notchInset(safeAreaTop: safeAreaTop)
             host?.update(sessions: lastSessions, layout: layout, variant: variant)
-            applyFrame(on: screen, animated: animated)
+            applyFrame(on: screen, safeAreaTop: safeAreaTop, hasNotch: hasNotch, animated: animated)
             if panel?.isVisible == false { panel?.orderFrontRegardless() }
         }
     }
 
     private enum Target {
         case hidden
-        case visible(NSScreen)
+        case visible(NSScreen, safeAreaTop: CGFloat, hasNotch: Bool)
     }
 
     // Screen selection per §9: prefer the built-in notch screen, NEVER use
@@ -353,34 +362,26 @@ final class DynamicIslandController {
     private func resolveTarget() -> Target {
         if #available(macOS 12.0, *) {
             if let notched = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) {
-                return .visible(notched)
+                return .visible(notched, safeAreaTop: notched.safeAreaInsets.top, hasNotch: true)
             }
             if let aux = NSScreen.screens.first(where: {
                 ($0.auxiliaryTopLeftArea?.width ?? 0) > 0 || ($0.auxiliaryTopRightArea?.width ?? 0) > 0
             }) {
-                return .visible(aux)
+                return .visible(aux, safeAreaTop: aux.safeAreaInsets.top, hasNotch: true)
             }
         }
-        // Clamshell with lid closed: a notch Mac whose built-in display went
-        // away. The whole visual depends on the notch — hide rather than
-        // squat on the external display.
+        // Clamshell: a notch Mac whose built-in display went away.
         if sawNotchHardware { return .hidden }
-        // True non-notch Mac (mini, Studio, MBA M1, older MBPs). Render the
-        // same pill in the menu bar's center.
+        // True non-notch Mac (mini, Studio, MBA M1, older MBPs).
         guard let first = NSScreen.screens.first else { return .hidden }
-        return .visible(first)
-    }
-
-    private func hasNotchHardware(_ screen: NSScreen) -> Bool {
-        if #available(macOS 12.0, *) { return screen.safeAreaInsets.top > 0 }
-        return false
+        return .visible(first, safeAreaTop: 0, hasNotch: false)
     }
 
     private func ensurePanel() {
         if panel != nil { return }
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0,
                                             width: IslandGeom.leadW + IslandGeom.coreW + 80,
-                                            height: IslandGeom.foldedH),
+                                            height: IslandGeom.contentH),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         p.isFloatingPanel = true
@@ -394,7 +395,7 @@ final class DynamicIslandController {
         p.becomesKeyOnlyIfNeeded = true
         let h = IslandHostView(frame: NSRect(x: 0, y: 0,
                                               width: IslandGeom.leadW + IslandGeom.coreW + 80,
-                                              height: IslandGeom.foldedH))
+                                              height: IslandGeom.contentH))
         h.controller = self
         p.contentView = h
         panel = p
@@ -409,9 +410,10 @@ final class DynamicIslandController {
         layout = l
         variant = v
         guard changed else { return }
-        guard case .visible(let screen) = resolveTarget() else { return }
+        guard case .visible(let screen, let safeAreaTop, let hasNotch) = resolveTarget() else { return }
+        host?.topInset = IslandGeom.notchInset(safeAreaTop: safeAreaTop)
         host?.update(sessions: lastSessions, layout: l, variant: v)
-        applyFrame(on: screen, animated: true)
+        applyFrame(on: screen, safeAreaTop: safeAreaTop, hasNotch: hasNotch, animated: true)
     }
 
     // Auto-expand to a card. Schedules its expiration timer per §6.
@@ -459,12 +461,12 @@ final class DynamicIslandController {
     }
     func cancelCollapse() { collapseWork?.cancel(); collapseWork = nil }
 
-    private func applyFrame(on screen: NSScreen, animated: Bool) {
+    private func applyFrame(on screen: NSScreen, safeAreaTop: CGFloat, hasNotch: Bool, animated: Bool) {
         guard let panel = panel else { return }
-        let size = sizeForState()
-        let origin = IslandGeom.origin(on: screen.frame, size: size)
+        let size = sizeForState(safeAreaTop: safeAreaTop)
+        let origin = IslandGeom.origin(on: screen.frame, size: size, hasNotch: hasNotch)
         let r = NSRect(origin: origin, size: size)
-        log("applyFrame layout=\(layout) variant=\(variant) screen=\(screen.frame) panel=\(r)")
+        log("applyFrame layout=\(layout) variant=\(variant) screen=\(screen.frame) safeTop=\(safeAreaTop) panel=\(r)")
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.28
@@ -476,15 +478,17 @@ final class DynamicIslandController {
         }
     }
 
-    private func sizeForState() -> NSSize {
+    private func sizeForState(safeAreaTop: CGFloat) -> NSSize {
         switch layout {
         case .closed:
             let agg = aggregateStatus(lastSessions.map { $0.s })
             let count = activeCount(lastSessions.map { $0.s })
-            return IslandGeom.foldedSize(count: count, word: islandStatusWord(agg))
+            return IslandGeom.foldedSize(safeAreaTop: safeAreaTop, count: count,
+                                          word: islandStatusWord(agg))
         case .opened:
             let nonIdle = activeCount(lastSessions.map { $0.s })
-            return IslandGeom.expandedSize(variant: variant, rowCount: nonIdle)
+            return IslandGeom.expandedSize(safeAreaTop: safeAreaTop,
+                                            variant: variant, rowCount: nonIdle)
         }
     }
 
@@ -506,6 +510,13 @@ final class IslandHostView: NSView {
     private var currentLayout: IslandLayout = .closed
     private var currentVariant: IslandCardVariant = .sessionList
     private var lastSig: String = ""
+
+    // Pixels reserved at the top of the host for the notch halo. The actual
+    // content (lead/core/trail or head+drawer) sits BELOW this. On notch Macs
+    // it's the safe-area inset (≈ 32-37pt); on non-notch Macs it's 0.
+    var topInset: CGFloat = 0 {
+        didSet { if topInset != oldValue { lastSig = ""; needsLayout = true } }
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -554,10 +565,12 @@ final class IslandHostView: NSView {
         }
         v.translatesAutoresizingMaskIntoConstraints = false
         addSubview(v)
+        // Push content BELOW the notch halo (topInset). On non-notch Macs
+        // topInset is 0 and the content fills the whole pill.
         NSLayoutConstraint.activate([
             v.leadingAnchor.constraint(equalTo: leadingAnchor),
             v.trailingAnchor.constraint(equalTo: trailingAnchor),
-            v.topAnchor.constraint(equalTo: topAnchor),
+            v.topAnchor.constraint(equalTo: topAnchor, constant: topInset),
             v.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         inner = v
@@ -659,7 +672,10 @@ final class IslandHostView: NSView {
 
         let hs = NSStackView(views: [countLabel, wordLabel])
         hs.orientation = .horizontal
-        hs.alignment = .lastBaseline
+        // centerY (not lastBaseline) — lastBaseline puts the BOTTOMS of both
+        // glyphs at the strip's vertical center, which then sends the serif
+        // count's ascender above the pill's top edge and gets clipped.
+        hs.alignment = .centerY
         hs.spacing = 5
         hs.translatesAutoresizingMaskIntoConstraints = false
         wrap.addSubview(hs)
@@ -736,7 +752,7 @@ final class IslandHostView: NSView {
 
         let hs = NSStackView(views: [countLabel, capLabel])
         hs.orientation = .horizontal
-        hs.alignment = .lastBaseline
+        hs.alignment = .centerY
         hs.spacing = 8
         hs.translatesAutoresizingMaskIntoConstraints = false
 

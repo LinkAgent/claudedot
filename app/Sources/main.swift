@@ -1351,21 +1351,23 @@ func renderOwls(to path: String) {
 func renderIslandSnapshot(to path: String) {
     let simulatedSafeTop: CGFloat = 37  // typical notch height on 14"/16" MBP
     let notchWidth: CGFloat = 200
-    let menuBarH: CGFloat = 24
+    // Menu bar on notched MBPs is 32pt tall — same as the safe-area inset.
+    // The island floats INSIDE this strip with 2pt air gaps top/bottom, so
+    // it should sit fully within the menu bar visually.
+    let menuBarH: CGFloat = 32
 
     func host(for vms: [SessionVM], layout: IslandLayout, variant: IslandCardVariant) -> (NSView, NSSize) {
         let size: NSSize
         switch layout {
         case .closed:
             let agg = aggregateStatus(vms.map { $0.s })
-            size = IslandGeom.foldedSize(safeAreaTop: simulatedSafeTop, idle: agg == .idle)
+            let n = activeCount(vms.map { $0.s })
+            size = IslandGeom.foldedSize(count: n, word: islandStatusWord(agg))
         case .opened:
             let n = activeCount(vms.map { $0.s })
-            size = IslandGeom.expandedSize(safeAreaTop: simulatedSafeTop, variant: variant, rowCount: n)
+            size = IslandGeom.expandedSize(variant: variant, rowCount: n)
         }
         let h = IslandHostView(frame: NSRect(origin: .zero, size: size))
-        h.topInset = IslandGeom.notchInset(safeAreaTop: simulatedSafeTop)
-        h.hasNotch = true   // snapshot draws a notch cutout above, so model it
         h.update(sessions: vms, layout: layout, variant: variant)
         h.layoutSubtreeIfNeeded()
         return (h, size)
@@ -1488,11 +1490,11 @@ func renderIslandSnapshot(to path: String) {
         notchPath.close()
         notchPath.fill()
 
-        // Render the island host into the cell, aligned so its top edge
-        // matches the simulated screen top (mirroring real placement).
+        // Render the island host into the cell at its real position: top edge
+        // 2pt below the simulated screen top — matches IslandGeom.origin().
         let (view, sz) = host(for: cell.vms, layout: cell.layout, variant: cell.variant)
         let islandX = bg.midX - sz.width / 2
-        let islandY = bg.maxY - sz.height
+        let islandY = bg.maxY - IslandGeom.menuBarAirGap - sz.height
         let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
         view.cacheDisplay(in: view.bounds, to: rep)
         rep.draw(in: NSRect(x: islandX, y: islandY, width: sz.width, height: sz.height))

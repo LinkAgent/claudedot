@@ -77,7 +77,16 @@ struct IslandGeom {
     static let fallbackIslandH: CGFloat = 28   // used only when no screen present
     static let airGap: CGFloat = 1   // 1pt top + 1pt bottom = pillH = menuBar − 2
 
-    static let leadW: CGFloat = 46
+    // Lead segment is asymmetric per §2.0 (2026-06): the pill is a full
+    // capsule whose left arc curves inward up to islandHeight/2 from the edge.
+    // With symmetric 12pt padding the owl visually pinned against the arc and
+    // read as off-center. 16pt L + 10pt R restores perceived centering —
+    // the 6pt delta compensates for the curvature. Right padding stays small
+    // because the right side abuts the notch-core (a straight edge).
+    static let owlSize: CGFloat = 22
+    static let leadLPad: CGFloat = 16
+    static let leadRPad: CGFloat = 10
+    static let leadW: CGFloat = leadLPad + owlSize + leadRPad   // = 48
     // Fallback notch-core width when the screen API gives us nothing useful.
     // Picked at 220 so a non-notch Mac still gets a pill wider than the
     // widest 16" MBP notch (~225pt) — keeps the visual & functional parity
@@ -662,15 +671,17 @@ final class IslandHostView: NSView {
         return stack
     }
 
-    // Lead = 22×22 owl, 12pt L padding, no pulse (owl color IS the state).
+    // Lead = 22×22 owl with asymmetric 16pt L / 10pt R padding (§2.0,
+    // 2026-06) — the 6pt extra on the left visually re-centers the owl past
+    // the pill's left arc.
     private func makeLeadSegment(for status: Status) -> NSView {
         let kind = islandKind(for: status)
-        let owl = makeOwl(for: kind, size: 22)
+        let owl = makeOwl(for: kind, size: IslandGeom.owlSize)
         let wrap = NSView()
         wrap.translatesAutoresizingMaskIntoConstraints = false
         wrap.addSubview(owl)
         NSLayoutConstraint.activate([
-            owl.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 12),
+            owl.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: IslandGeom.leadLPad),
             owl.centerYAnchor.constraint(equalTo: wrap.centerYAnchor),
             wrap.widthAnchor.constraint(equalToConstant: IslandGeom.leadW),
         ])

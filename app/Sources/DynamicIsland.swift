@@ -73,7 +73,12 @@ struct IslandGeom {
 
     static let leadW: CGFloat = 46
     static let coreW: CGFloat = 180
-    static let trailRPad: CGFloat = 14
+    // Trail breathing room: 18pt between the notch-core and the count's left
+    // edge so the digit isn't pressed up against the notch. 16pt from the
+    // word's right edge to the pill's rounded right end so the pill's curve
+    // doesn't clip the last letter.
+    static let trailLGap: CGFloat = 18
+    static let trailRPad: CGFloat = 16
     static let closedRadius: CGFloat = 14
     static let openedRadius: CGFloat = 18
 
@@ -92,7 +97,8 @@ struct IslandGeom {
 
     // Measure the trail at render-time font sizes (serif 17 count + SF 11.5
     // word + 5pt gap) so the pill width matches what actually draws.
-    // Otherwise a tighter-sized window clips the right edge of the word.
+    // trailLGap on the left keeps the count clear of the notch-core boundary;
+    // trailRPad on the right keeps the word clear of the pill's rounded end.
     static func trailWidth(count: Int, word: String) -> CGFloat {
         guard !word.isEmpty, count > 0 else { return 0 }
         let countText = count >= 100 ? "99+" : "\(count)"
@@ -103,7 +109,7 @@ struct IslandGeom {
         let wordFont = NSFont.systemFont(ofSize: 11.5, weight: .medium)
         let cw = ceil(NSAttributedString(string: countText, attributes: [.font: countFont]).size().width)
         let ww = ceil(NSAttributedString(string: word, attributes: [.font: wordFont]).size().width)
-        return cw + 5 + ww + trailRPad + 6
+        return trailLGap + cw + 5 + ww + trailRPad
     }
 
     static func foldedSize(count: Int, word: String) -> NSSize {

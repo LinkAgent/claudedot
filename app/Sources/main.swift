@@ -1350,22 +1350,36 @@ func renderOwls(to path: String) {
 // can be inspected from the resulting PNG. See issue #12.
 func renderIslandSnapshot(to path: String) {
     let simulatedSafeTop: CGFloat = 37  // typical notch height on 14"/16" MBP
-    let notchWidth: CGFloat = 200
-    let menuBarH: CGFloat = 24
+    // Simulated physical notch width: 205pt = 14" MBP Pro M-series.
+    let notchWidth: CGFloat = 205
+    let simulatedNotchCore: CGFloat = 205 + IslandGeom.coreSafetyMargin  // = 229
+    // Simulated menu bar height & pill height — matches the 14"/16" MBP
+    // (safeAreaInsets.top == menuBarHeight on notched Macs).
+    let simulatedMenuBarH: CGFloat = 37
+    let simulatedIslandH: CGFloat = simulatedMenuBarH - 2  // 35pt pill
+    // Menu bar on notched MBPs is 32pt tall — same as the safe-area inset.
+    // The island floats INSIDE this strip with 2pt air gaps top/bottom, so
+    // it should sit fully within the menu bar visually.
+    let menuBarH: CGFloat = 32
 
     func host(for vms: [SessionVM], layout: IslandLayout, variant: IslandCardVariant) -> (NSView, NSSize) {
         let size: NSSize
         switch layout {
         case .closed:
             let agg = aggregateStatus(vms.map { $0.s })
-            size = IslandGeom.foldedSize(safeAreaTop: simulatedSafeTop, idle: agg == .idle)
+            let n = activeCount(vms.map { $0.s })
+            size = IslandGeom.foldedSize(islandHeight: simulatedIslandH,
+                                          notchCoreWidth: simulatedNotchCore,
+                                          count: n, word: islandStatusWord(agg))
         case .opened:
             let n = activeCount(vms.map { $0.s })
-            size = IslandGeom.expandedSize(safeAreaTop: simulatedSafeTop, variant: variant, rowCount: n)
+            size = IslandGeom.expandedSize(islandHeight: simulatedIslandH,
+                                            notchCoreWidth: simulatedNotchCore,
+                                            variant: variant, rowCount: n)
         }
         let h = IslandHostView(frame: NSRect(origin: .zero, size: size))
-        h.topInset = IslandGeom.notchInset(safeAreaTop: simulatedSafeTop)
-        h.hasNotch = true   // snapshot draws a notch cutout above, so model it
+        h.notchCoreWidth = simulatedNotchCore
+        h.islandHeight = simulatedIslandH
         h.update(sessions: vms, layout: layout, variant: variant)
         h.layoutSubtreeIfNeeded()
         return (h, size)
@@ -1488,11 +1502,10 @@ func renderIslandSnapshot(to path: String) {
         notchPath.close()
         notchPath.fill()
 
-        // Render the island host into the cell, aligned so its top edge
-        // matches the simulated screen top (mirroring real placement).
+        // Mirror IslandGeom.origin: pill sits with 1pt air gap from screen top.
         let (view, sz) = host(for: cell.vms, layout: cell.layout, variant: cell.variant)
         let islandX = bg.midX - sz.width / 2
-        let islandY = bg.maxY - sz.height
+        let islandY = bg.maxY - IslandGeom.airGap - sz.height
         let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
         view.cacheDisplay(in: view.bounds, to: rep)
         rep.draw(in: NSRect(x: islandX, y: islandY, width: sz.width, height: sz.height))

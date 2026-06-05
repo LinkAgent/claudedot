@@ -30,6 +30,7 @@ State file schema (one per active session):
 
 import json
 import os
+import re
 import sys
 import time
 import tempfile
@@ -46,6 +47,28 @@ def _truncate(text, n=100):
     if n == 1:
         return "…"
     return text[: n - 1] + "…"
+
+
+_SYSTEM_TAG_BLOCK_RE = re.compile(
+    r"<(?P<tag>[a-z][a-z0-9_-]*)\b[^>]*>.*?</(?P=tag)>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_system_injections(text):
+    """Strip XML-style tag blocks Claude Code injects into the user prompt
+    context — e.g. <task-notification>…</task-notification>,
+    <system-reminder>…</system-reminder>, <command-name>…</command-name>.
+    These aren't user input, so they shouldn't be captured as session titles.
+    Iterates so nested blocks collapse fully; returns the trimmed remainder."""
+    if not text:
+        return ""
+    prev = None
+    out = text
+    while prev != out:
+        prev = out
+        out = _SYSTEM_TAG_BLOCK_RE.sub("", out)
+    return out.strip()
 
 
 def _state_path(session_id):
@@ -142,8 +165,9 @@ def compute_update(payload, prev):
     elif event == "UserPromptSubmit":
         prompt = payload.get("prompt", "")
         state["status"] = "running"
-        if prompt.strip():
-            state["title"] = _truncate(prompt, 100)
+        cleaned = _strip_system_injections(prompt)
+        if cleaned:
+            state["title"] = _truncate(cleaned, 100)
         state["last_event"] = "working on your request"
         # New turn: clear the previous turn's error.
         state["last_error"] = None
@@ -186,14 +210,14 @@ def compute_update(payload, prev):
         state["last_event"] = _truncate(msg, 100)
 
     elif event == "Stop":
-        # The agent's turn ended; the session is now literally blocked on the
-        # user to type the next prompt. That IS "needs input" — surface it as
-        # waiting (yellow) so the menu-bar dot reflects sessions you owe a reply
-        # to, rather than going green-only and hiding the asks. Mirrors desktop
-        # inference where AskUserQuestion / ExitPlanMode also yield .waiting
-        # regardless of age (see inferDesktopStatus in Model.swift).
-        state["status"] = "waiting"
-        state["last_event"] = "done – awaiting input"
+        # The agent's turn ended. We do NOT flip to waiting here: every reply
+        # would then flash yellow, drowning out the cases that really need the
+        # user (permission prompts, AskUserQuestion, ExitPlanMode, Notification).
+        # Yellow is reserved for "needs input or further work"; a finished turn
+        # awaiting the next prompt is just idle. (See merge in Model.swift —
+        # native `waiting` + the user-blocking tools still light the dot up.)
+        state["status"] = "idle"
+        state["last_event"] = "turn ended"
         clear_pending()
 
     elif event == "SubagentStop":

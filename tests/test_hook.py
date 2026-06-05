@@ -61,8 +61,10 @@ def test_transitions():
     check("notification message shown", "permission" in st["last_event"])
 
     st = h.compute_update(ev("Stop"), st)
-    check("Stop -> waiting (turn done, blocked on user)", st["status"] == "waiting")
-    check("Stop event text mentions awaiting input", "awaiting input" in st["last_event"])
+    # Stop goes to idle, not waiting: yellow is reserved for "needs input or
+    # further work". A finished turn awaiting the next prompt is idle.
+    check("Stop -> idle (turn done, no explicit ask)", st["status"] == "idle")
+    check("Stop event text mentions turn ended", "turn ended" in st["last_event"])
 
     # SubagentStop must NOT flip the parent to waiting — the parent agent is
     # still running while a Task subagent finishes.
@@ -242,6 +244,21 @@ def test_compute_update_edges():
     prev = {"title": "Existing title", "folder": "myproj"}
     st = h.compute_update(ev("UserPromptSubmit", prompt="   "), prev)
     check("blank prompt preserves title", st["title"] == "Existing title")
+
+    # System-injection prompts (task-notification, system-reminder, etc.) are
+    # not real user input and must not pollute the title.
+    prev = {"title": "Real prompt", "folder": "myproj"}
+    injected = ('<task-notification><task-id>abc</task-id>'
+                '<summary>Monitor event: deploy x</summary></task-notification>')
+    st = h.compute_update(ev("UserPromptSubmit", prompt=injected), prev)
+    check("task-notification prompt preserves title", st["title"] == "Real prompt")
+
+    # Mixed: a system tag block followed by real user text → title is the
+    # cleaned user portion.
+    prev = {"title": "old", "folder": "myproj"}
+    mixed = "<system-reminder>nag</system-reminder>\nFix the bug"
+    st = h.compute_update(ev("UserPromptSubmit", prompt=mixed), prev)
+    check("mixed prompt keeps human text", st["title"] == "Fix the bug")
 
     # SessionEnd marks ended=True so main() can unlink the file.
     st = h.compute_update(ev("SessionEnd"), {})

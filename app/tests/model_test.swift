@@ -44,6 +44,17 @@ check("stale running decays to idle",
       aggregateStatus([sess(.running, age: 120)], now: now) == .idle)
 check("fresh running stays running",
       aggregateStatus([sess(.running, age: 10)], now: now) == .running)
+// trustedActive disables the running decay — used when native says busy or a
+// Desktop hook is the live signal. A long "thinking" turn (no events for 2min)
+// should stay running in the glyph, not flip to idle.
+let trustedStale = Session(id: "t", status: .running,
+                            updatedAt: now - 600, trustedActive: true)
+check("trustedActive running stays running past window",
+      aggregateStatus([trustedStale], now: now) == .running)
+check("trustedActive running counts as active",
+      activeCount([trustedStale], now: now) == 1)
+check("untrusted stale running drops from activeCount",
+      activeCount([sess(.running, age: 600)], now: now) == 0)
 // Errors are transient in the aggregate: a fresh error shows, but one past the
 // runningLivenessWindow (90s) decays to idle so native recovery can win — see
 // the dynamic-island spec's §3 error transience note + aggregateStatus().
@@ -97,6 +108,20 @@ let m1 = mergeSessions(native: [nsess("a", "busy"), nsess("b", "waiting")], hook
 check("native-only discovery count", m1.count == 2)
 check("native-only busy -> running", m1.first(where: { $0.id == "a" })?.status == .running)
 check("native-only waiting -> waiting", m1.first(where: { $0.id == "b" })?.status == .waiting)
+// Native busy/waiting are authoritative — merge marks them trusted so the
+// aggregate doesn't decay them during a long thinking turn.
+check("native busy is trustedActive",
+      m1.first(where: { $0.id == "a" })?.trustedActive == true)
+check("native waiting is trustedActive",
+      m1.first(where: { $0.id == "b" })?.trustedActive == true)
+let m1Idle = mergeSessions(native: [nsess("idle", "idle")], hooks: [:], now: now)
+check("native idle is NOT trustedActive",
+      m1Idle.first?.trustedActive == false)
+// A native busy session whose updatedAt is ancient still stays running in the
+// aggregate — this is the "model is thinking for minutes" case.
+let m1Old = mergeSessions(native: [nsess("a", "busy", age: 600)], hooks: [:], now: now)
+check("ancient native busy still aggregates as running",
+      aggregateStatus(m1Old, now: now) == .running)
 
 // hook error overlays a native busy session
 let m2 = mergeSessions(native: [nsess("a", "busy")],
@@ -113,6 +138,21 @@ check("stale error yields to native busy (recovery)", m3.first?.status == .runni
 let m4 = mergeSessions(native: [nsess("a", "busy")],
                        hooks: ["a": hsess("a", .running, title: "Fix login")], now: now)
 check("hook title used", m4.first?.title == "Fix login")
+
+// A hook saying "waiting" (AskUserQuestion / ExitPlanMode / Notification)
+// must override a native "busy" for CLI sessions — the agent is blocked on the
+// user, and the user-facing dot must reflect that rather than green-running.
+let mWaitOverride = mergeSessions(
+    native: [nsess("c", "busy")],
+    hooks: ["c": hsess("c", .waiting, age: 1)], now: now)
+check("hook waiting overrides native busy (CLI)",
+      mWaitOverride.first?.status == .waiting)
+// Stale hook waiting yields to native recovery — only fresh asks override.
+let mWaitStale = mergeSessions(
+    native: [nsess("c", "busy")],
+    hooks: ["c": hsess("c", .waiting, age: 1000)], now: now)
+check("stale hook waiting yields to native busy",
+      mWaitStale.first?.status == .running)
 
 // hook-only recent active session (headless run) is included
 let m5 = mergeSessions(native: [], hooks: ["z": hsess("z", .running, age: 5)], now: now)
@@ -245,6 +285,8 @@ check("desktop+hook: hook status overrides native idle",
       md8.first?.status == .running)
 check("desktop+hook: flagged isDesktop",
       md8.first?.isDesktop == true)
+check("desktop+hook running is trustedActive",
+      md8.first?.trustedActive == true)
 // Even when hook says idle, the live native pid means the row is worth showing —
 // hook idle on a desktop entry means "done, awaiting input", not "gone".
 let md9 = mergeSessions(native: [ndesk("dk3")],
@@ -252,6 +294,46 @@ let md9 = mergeSessions(native: [ndesk("dk3")],
                         desktop: [], now: now)
 check("desktop+idle hook still surfaces the live row",
       md9.count == 1 && md9.first?.status == .idle && md9.first?.pid == 777)
+
+// Fresh-Desktop fallback: native claude-desktop entry, no hook, no transcript
+// (so loadDesktop's desktop list omits it), but startedAt is within the last
+// 5 minutes — surface as running so a brand-new conversation isn't invisible.
+let mdFresh = mergeSessions(
+    native: [NativeSession(pid: 888, sessionId: "dkFresh", cwd: "/a/dkFresh",
+                            nativeStatus: "idle", entrypoint: "claude-desktop",
+                            updatedAt: 0, startedAt: now - 30)],
+    hooks: [:], desktop: [], now: now)
+check("fresh desktop (no hook, no transcript) surfaces",
+      mdFresh.count == 1 && mdFresh.first?.id == "dkFresh")
+check("fresh desktop fallback status = running",
+      mdFresh.first?.status == .running)
+check("fresh desktop fallback flagged isDesktop",
+      mdFresh.first?.isDesktop == true)
+check("fresh desktop fallback is trustedActive",
+      mdFresh.first?.trustedActive == true)
+// An old startedAt (beyond 5min) without hook or transcript is dropped — that
+// fallback is only for brand-new conversations the other paths haven't caught up to.
+let mdOld = mergeSessions(
+    native: [NativeSession(pid: 889, sessionId: "dkOld", cwd: "/a/dkOld",
+                            nativeStatus: "idle", entrypoint: "claude-desktop",
+                            updatedAt: 0, startedAt: now - 9999)],
+    hooks: [:], desktop: [], now: now)
+check("old desktop without hook/transcript dropped", mdOld.isEmpty)
+// If the desktop scanner already surfaced the session, the fresh-fallback does
+// not duplicate it.
+let mdFreshDup = mergeSessions(
+    native: [NativeSession(pid: 890, sessionId: "dkDup", cwd: "/a/dkDup",
+                            nativeStatus: "idle", entrypoint: "claude-desktop",
+                            updatedAt: 0, startedAt: now - 5)],
+    hooks: [:], desktop: [dsess("dkDup", .running)], now: now)
+check("fresh-fallback de-duped with desktop scanner row", mdFreshDup.count == 1)
+
+// NativeSession parses startedAt (ms -> seconds), falls back to 0
+let natWithStart = NativeSession(json: ["pid": 1, "sessionId": "x", "status": "busy",
+                                         "startedAt": now * 1000.0])
+check("native parses startedAt", natWithStart?.startedAt == now)
+let natNoStart = NativeSession(json: ["pid": 1, "sessionId": "y", "status": "busy"])
+check("native missing startedAt -> 0", natNoStart?.startedAt == 0)
 
 // --- Functional / edge-case coverage added below ---
 

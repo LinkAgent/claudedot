@@ -14,6 +14,9 @@ import sys
 
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 TAG = "cc-statusbar"  # marker stored on each entry we add
+# Legacy installs (pre-tagging) wrote entries without _tag. We also identify
+# our hooks by command-path substring so re-running install dedupes them.
+HOOK_BASENAME = "cc_statusbar_hook.py"
 
 # Events we hook, and whether they take a tool matcher.
 EVENTS = {
@@ -52,13 +55,23 @@ def save(data):
         f.write("\n")
 
 
+def _is_ours(hook):
+    """An entry is ours if it carries our tag OR its command runs our hook
+    script (legacy installs lacked the tag). Path-matching catches duplicates
+    from pre-tagging installs that would otherwise survive every reinstall."""
+    if hook.get("_tag") == TAG:
+        return True
+    cmd = hook.get("command") or ""
+    return HOOK_BASENAME in cmd
+
+
 def strip_ours(groups):
     """Remove our previously-installed entries from an event's group list.
     Groups left with no hooks are dropped entirely."""
     cleaned = []
     for group in groups:
         original = group.get("hooks", [])
-        hooks = [h for h in original if h.get("_tag") != TAG]
+        hooks = [h for h in original if not _is_ours(h)]
         if not hooks:
             continue  # group became empty (or only ever held our hook) -> drop
         if len(hooks) != len(original):
@@ -107,11 +120,48 @@ def uninstall():
         print("No status-bar hooks found (no settings.json)")
 
 
+def diagnose():
+    """Report on the current hook installation: which events are wired up,
+    how many entries each event has, and whether duplicates exist. Exit
+    non-zero when something looks off so CI / install scripts can catch it."""
+    data = load()
+    hooks = data.get("hooks", {})
+    problems = 0
+    print(f"settings: {SETTINGS}")
+    for event in EVENTS:
+        groups = hooks.get(event, [])
+        ours_count = 0
+        tagged = 0
+        legacy = 0
+        for group in groups:
+            for hook in group.get("hooks", []):
+                if hook.get("_tag") == TAG:
+                    ours_count += 1
+                    tagged += 1
+                elif HOOK_BASENAME in (hook.get("command") or ""):
+                    ours_count += 1
+                    legacy += 1
+        flag = ""
+        if ours_count == 0:
+            flag = " MISSING"
+            problems += 1
+        elif ours_count > 1:
+            flag = f" DUPLICATE ({tagged} tagged, {legacy} legacy)"
+            problems += 1
+        print(f"  {event:<18s} {ours_count} ours{flag}")
+    if problems:
+        print(f"{problems} problem(s) — run install_hooks.py <command> to repair.")
+        sys.exit(1)
+    print("OK")
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "--uninstall":
         uninstall()
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--diagnose":
+        diagnose()
     elif len(sys.argv) >= 2:
         install(sys.argv[1])
     else:
-        print("usage: install_hooks.py <command> | --uninstall", file=sys.stderr)
+        print("usage: install_hooks.py <command> | --uninstall | --diagnose", file=sys.stderr)
         sys.exit(2)

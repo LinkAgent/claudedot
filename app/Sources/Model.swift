@@ -60,6 +60,14 @@ struct Session {
     // focused via a terminal/tty or resolved remotely — jump just brings the
     // desktop app forward (see `jump` in main.swift).
     var isDesktop: Bool = false
+    // "Trust the status without an age check." Set by mergeSessions when the
+    // status comes from a still-live, authoritative source (native registry's
+    // busy/waiting, or a hook on a Desktop session whose pid is alive). It
+    // disables the runningLivenessWindow decay in aggregateStatus / activeCount
+    // / islandFocusSession so a session that's actually busy (e.g. the model is
+    // thinking and no events have fired for 2 minutes) doesn't flip to idle in
+    // the glyph. updatedAt still reflects the last real event for display.
+    var trustedActive: Bool = false
 
     init?(json: [String: Any]) {
         guard let id = json["session_id"] as? String, !id.isEmpty else { return nil }
@@ -83,12 +91,12 @@ struct Session {
          title: String = "", lastEvent: String = "", lastError: String? = nil,
          errorAt: Double? = nil, updatedAt: Double, pid: Int32? = nil,
          pendingTool: String? = nil, pendingInput: String? = nil,
-         isDesktop: Bool = false) {
+         isDesktop: Bool = false, trustedActive: Bool = false) {
         self.id = id; self.folder = folder; self.cwd = cwd; self.status = status
         self.title = title; self.lastEvent = lastEvent; self.lastError = lastError
         self.errorAt = errorAt; self.updatedAt = updatedAt; self.pid = pid
         self.pendingTool = pendingTool; self.pendingInput = pendingInput
-        self.isDesktop = isDesktop
+        self.isDesktop = isDesktop; self.trustedActive = trustedActive
     }
 }
 
@@ -112,6 +120,7 @@ struct NativeSession {
     var kind: String
     var entrypoint: String
     var updatedAt: Double       // seconds (native file stores ms)
+    var startedAt: Double       // seconds; falls back to 0 if absent
 
     init?(json: [String: Any]) {
         guard let sid = json["sessionId"] as? String else { return nil }
@@ -130,16 +139,19 @@ struct NativeSession {
         self.entrypoint = (json["entrypoint"] as? String) ?? "cli"
         let ms = (json["updatedAt"] as? Double) ?? ((json["updatedAt"] as? Int).map(Double.init) ?? 0)
         self.updatedAt = ms / 1000.0
+        let sms = (json["startedAt"] as? Double) ?? ((json["startedAt"] as? Int).map(Double.init) ?? 0)
+        self.startedAt = sms / 1000.0
     }
 
     init(pid: Int32, sessionId: String, cwd: String, nativeStatus: String,
          waitingFor: String? = nil, kind: String = "interactive",
-         entrypoint: String = "cli", updatedAt: Double) {
+         entrypoint: String = "cli", updatedAt: Double, startedAt: Double = 0) {
         self.pid = pid; self.sessionId = sessionId; self.cwd = cwd
         self.folder = (cwd as NSString).lastPathComponent
         if self.folder.isEmpty { self.folder = cwd }
         self.nativeStatus = nativeStatus; self.waitingFor = waitingFor
-        self.kind = kind; self.entrypoint = entrypoint; self.updatedAt = updatedAt
+        self.kind = kind; self.entrypoint = entrypoint
+        self.updatedAt = updatedAt; self.startedAt = startedAt
     }
 
     // Human-readable activity line for the dropdown when no richer hook event.
@@ -300,6 +312,17 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
         if n.entrypoint == "claude-desktop", let h = h {
             status = h.status
         }
+        // Hook `waiting` overrides native `busy` for CLI sessions too: the hook
+        // fires PreToolUse for AskUserQuestion / ExitPlanMode / Notification
+        // (the user-blocking signals) while the native registry can still read
+        // "busy" — without this override, a session that's literally blocked on
+        // your answer would show green. Only honor it while the hook is recent;
+        // a stale hook waiting yields to native (recovery).
+        if let h = h, h.status == .waiting,
+           now - h.updatedAt < runningLivenessWindow,
+           status != .waiting {
+            status = .waiting
+        }
         // Error overlay: only our hooks know about tool failures. Apply while
         // the error is recent; if Claude has since gone busy/waiting natively
         // and the error aged out, the native status (recovery) wins.
@@ -317,12 +340,24 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
             if let h = h, h.updatedAt >= n.updatedAt, !h.lastEvent.isEmpty { return h.lastEvent }
             return n.activityText
         }()
+        // Trust the resolved status without an age check when the source is
+        // still live: native says busy/waiting right now (pid filtered alive in
+        // loadNative), or this is a Desktop entry whose hook just reported
+        // running/waiting. Without this flag the aggregate would flip to idle
+        // 90s into a long "thinking" turn even though the session really is busy.
+        let trusted: Bool = {
+            if n.nativeStatus == "busy" || n.nativeStatus == "waiting" { return true }
+            if n.entrypoint == "claude-desktop", let h = h,
+               h.status == .running || h.status == .waiting { return true }
+            return false
+        }()
 
         out.append(Session(id: n.sessionId, folder: n.folder, cwd: n.cwd, status: status,
                            title: title, lastEvent: lastEvent, lastError: h?.lastError,
                            errorAt: h?.errorAt, updatedAt: updated, pid: n.pid,
                            pendingTool: h?.pendingTool, pendingInput: h?.pendingInput,
-                           isDesktop: n.entrypoint == "claude-desktop"))
+                           isDesktop: n.entrypoint == "claude-desktop",
+                           trustedActive: trusted))
     }
 
     for (id, h) in hooks where !usedHookIds.contains(id) {
@@ -337,16 +372,40 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
     // rule, so the dozens of historical desktop sessions don't flood the list),
     // and skip any id already surfaced by native/hook discovery.
     var seen = Set(out.map { $0.id })
+
+    // Fresh-Desktop fallback: a claude-desktop native entry with no hook and no
+    // transcript on disk yet (startedAt within the last 5 min) is a brand-new
+    // conversation. Without this we'd drop it entirely until the first hook or
+    // transcript line. Surface as running so the user sees their new session.
+    let freshDesktopWindow: Double = 300
+    for n in native where n.entrypoint == "claude-desktop"
+        && hooks[n.sessionId] == nil
+        && !desktop.contains(where: { $0.sessionId == n.sessionId })
+        && !seen.contains(n.sessionId)
+        && n.startedAt > 0 && now - n.startedAt < freshDesktopWindow {
+        out.append(Session(id: n.sessionId, folder: n.folder, cwd: n.cwd,
+                           status: .running, title: n.folder,
+                           lastEvent: "session started", updatedAt: n.startedAt,
+                           pid: n.pid, isDesktop: true, trustedActive: true))
+        seen.insert(n.sessionId)
+    }
+
     for d in desktop where !seen.contains(d.sessionId) {
         // .waiting = blocked on the user (a question / plan approval) — keep it
         // visible no matter how long it's been quiet; that's the whole point of a
         // "needs input" flag. .running only counts while the transcript is fresh.
         let include = d.status == .waiting || (now - d.updatedAt < 120 && d.status == .running)
         if include {
+            // Transcript-inferred waiting is "blocked on user" — never decay.
+            // Running is gated on freshness above; let aggregate apply its own
+            // staleness check so a session that quietly stalls (transcript stops
+            // appending) drops out of the glyph after 90s.
+            let trusted = d.status == .waiting
             out.append(Session(id: d.sessionId, folder: d.folder, cwd: d.cwd,
                                status: d.status, title: d.title,
                                lastEvent: d.activityText, updatedAt: d.updatedAt,
-                               pid: desktopPid[d.sessionId], isDesktop: true))
+                               pid: desktopPid[d.sessionId], isDesktop: true,
+                               trustedActive: trusted))
             seen.insert(d.sessionId)
         }
     }
@@ -374,7 +433,11 @@ func relativeAge(_ epoch: Double, now: Double = Date().timeIntervalSince1970) ->
 func aggregateStatus(_ sessions: [Session], now: Double = Date().timeIntervalSince1970) -> Status {
     var best: Status = .idle
     for s in sessions {
-        let isRecent = now - s.updatedAt < runningLivenessWindow
+        // trustedActive disables the running decay: the source is still live
+        // (native says busy/waiting right now, or a Desktop hook just updated).
+        // Error transience still applies — a stale error always yields to
+        // recovery regardless of trust.
+        let isRecent = s.trustedActive || (now - s.updatedAt < runningLivenessWindow)
         let errorRecent: Bool = (s.errorAt ?? s.updatedAt) > now - runningLivenessWindow
         let effective: Status
         switch s.status {
@@ -395,7 +458,9 @@ func activeCount(_ sessions: [Session], now: Double = Date().timeIntervalSince19
     sessions.reduce(0) { acc, s in
         switch s.status {
         case .idle: return acc
-        case .running: return acc + (now - s.updatedAt < runningLivenessWindow ? 1 : 0)
+        case .running:
+            let live = s.trustedActive || (now - s.updatedAt < runningLivenessWindow)
+            return acc + (live ? 1 : 0)
         case .error:   return acc + ((s.errorAt ?? s.updatedAt) > now - runningLivenessWindow ? 1 : 0)
         case .waiting: return acc + 1
         }
@@ -447,7 +512,8 @@ func islandFocusSession(_ sessions: [Session], aggregate: Status,
         return sessions.filter { $0.status == .waiting }
             .max(by: { $0.updatedAt < $1.updatedAt })
     case .running:
-        return sessions.filter { $0.status == .running && now - $0.updatedAt < runningLivenessWindow }
+        return sessions
+            .filter { $0.status == .running && ($0.trustedActive || now - $0.updatedAt < runningLivenessWindow) }
             .max(by: { $0.updatedAt < $1.updatedAt })
     }
 }

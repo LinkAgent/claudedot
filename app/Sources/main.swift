@@ -794,7 +794,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // A cheap transcript-mtime gate runs before the tail read; surviving sessions
     // get a status inferred from their transcript tail, and only non-idle ones are
     // kept (idle = nothing to show; merge would drop them anyway).
-    func loadDesktop() -> [DesktopSession] {
+    // `liveDesktopIds`: cliSessionIds whose pid is alive in the native registry —
+    // for those we bypass the mtime gate. The session can sit quietly on a
+    // user-blocking question for hours; the gate would have dropped it.
+    func loadDesktop(liveDesktopIds: Set<String> = []) -> [DesktopSession] {
         let fm = FileManager.default
         let now = Date().timeIntervalSince1970
         var result: [DesktopSession] = []
@@ -810,6 +813,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     guard let data = fm.contents(atPath: path),
                           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           var d = DesktopSession(json: obj) else { continue }
+                    let isLive = liveDesktopIds.contains(d.sessionId)
                     // Activity is judged by the TRANSCRIPT mtime, not the file's
                     // lastActivityAt — the latter lags by minutes (it tracks UI
                     // focus, not work), which would drop live sessions and show a
@@ -817,7 +821,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     guard let tpath = findTranscript(d.sessionId) else { continue }
                     let mtime = ((try? fm.attributesOfItem(atPath: tpath))?[.modificationDate] as? Date)?
                         .timeIntervalSince1970 ?? 0
-                    if now - mtime >= desktopReadWindow { continue } // long inactive — skip the tail read
+                    // Live (pid alive) sessions: always read the tail — they can
+                    // sit on AskUserQuestion / ExitPlanMode for an unbounded time
+                    // and that quiet IS the wait. Dead sessions still respect the
+                    // 6h window so the scanner stays cheap on long histories.
+                    if !isLive && now - mtime >= desktopReadWindow { continue }
                     let tail = transcriptTail(d.sessionId)
                     d.updatedAt = mtime
                     d.status = inferDesktopStatus(pendingTool: tail.pendingTool, mtime: mtime, now: now)
@@ -829,12 +837,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func loadSessions() -> [Session] {
-        mergeSessions(native: loadNative(), hooks: loadHookStates(), desktop: loadDesktop())
+        let n = loadNative()
+        var liveDesktopIds = Set<String>()
+        for s in n where s.entrypoint == "claude-desktop" { liveDesktopIds.insert(s.sessionId) }
+        return mergeSessions(native: n, hooks: loadHookStates(),
+                             desktop: loadDesktop(liveDesktopIds: liveDesktopIds))
     }
 
-    // Read the tail of a session's transcript (last ~16KB only, so huge files
+    // Read the tail of a session's transcript (last ~64KB only, so huge files
     // stay cheap): returns the tool name it ends on with no answer (nil if none)
     // and the file's mtime — the two inputs to inferDesktopStatus.
+    // 64KB was 16KB; a single tool_result with a long stdout dump can be ~30KB
+    // and would shove the role markers we look for out of a 16KB window, so a
+    // session that's actually mid-Bash would parse as "no pending" and decay
+    // to idle. 64KB comfortably covers a few full turns.
     func transcriptTail(_ id: String) -> (pendingTool: String?, mtime: Double) {
         guard let path = findTranscript(id) else { return (nil, 0) }
         let fm = FileManager.default
@@ -843,7 +859,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, mtime) }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
-        let window: UInt64 = 16 * 1024
+        let window: UInt64 = 64 * 1024
         let start = size > window ? size - window : 0
         try? handle.seek(toOffset: start)
         guard let data = try? handle.readToEnd(), !data.isEmpty else { return (nil, mtime) }

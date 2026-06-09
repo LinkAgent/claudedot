@@ -1518,10 +1518,11 @@ func renderIslandSnapshot(to path: String) {
         notchPath.close()
         notchPath.fill()
 
-        // Mirror IslandGeom.origin: pill sits with 1pt air gap from screen top.
+        // Mirror IslandGeom.origin: simulated screen carries a notch, so the
+        // pill sits flush against the top (no air gap) to wrap the notch.
         let (view, sz) = host(for: cell.vms, layout: cell.layout, variant: cell.variant)
         let islandX = bg.midX - sz.width / 2
-        let islandY = bg.maxY - IslandGeom.airGap - sz.height
+        let islandY = bg.maxY - sz.height
         // Caching needs an explicit alpha-aware bitmap rep so the pill's rounded
         // corners come through as transparent. bitmapImageRepForCachingDisplay
         // (the default) produces an opaque bitmap → the 4 corner pixels outside

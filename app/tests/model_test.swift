@@ -55,6 +55,36 @@ check("trustedActive running counts as active",
       activeCount([trustedStale], now: now) == 1)
 check("untrusted stale running drops from activeCount",
       activeCount([sess(.running, age: 600)], now: now) == 0)
+
+// --- effectiveStatus: the one rule the badge / popover / island all share ---
+check("effective: fresh running stays running",
+      effectiveStatus(sess(.running, age: 10), now: now) == .running)
+check("effective: stale running decays to idle",
+      effectiveStatus(sess(.running, age: 600), now: now) == .idle)
+check("effective: trustedActive stale running stays running",
+      effectiveStatus(trustedStale, now: now) == .running)
+check("effective: fresh error stays error",
+      effectiveStatus(sess(.error, age: 10), now: now) == .error)
+check("effective: stale error decays to idle",
+      effectiveStatus(sess(.error, age: 100000), now: now) == .idle)
+check("effective: waiting always waiting",
+      effectiveStatus(sess(.waiting, age: 100000), now: now) == .waiting)
+
+// One stale-running + one fresh-waiting: every "active" surface must report
+// the same thing (this is the bug in #21 — badge said 1, popover said 2).
+let mixedActive = [sess(.running, age: 600), sess(.waiting, age: 1)]
+check("statusCount running excludes the stale one", statusCount(mixedActive, .running, now: now) == 0)
+check("statusCount waiting counts the fresh one", statusCount(mixedActive, .waiting, now: now) == 1)
+check("activeCount agrees with the per-status split",
+      activeCount(mixedActive, now: now) == statusCount(mixedActive, .running, now: now)
+                                          + statusCount(mixedActive, .waiting, now: now)
+                                          + statusCount(mixedActive, .error, now: now))
+check("aggregate of the mixed set is waiting (running decayed)",
+      aggregateStatus(mixedActive, now: now) == .waiting)
+// trustedActive flips the same stale-running session back to counted everywhere.
+let mixedTrusted = [trustedStale, sess(.waiting, age: 1)]
+check("trusted stale running counts in statusCount", statusCount(mixedTrusted, .running, now: now) == 1)
+check("trusted mixed activeCount == 2", activeCount(mixedTrusted, now: now) == 2)
 // Errors are transient in the aggregate: a fresh error shows, but one past the
 // runningLivenessWindow (90s) decays to idle so native recovery can win — see
 // the dynamic-island spec's §3 error transience note + aggregateStatus().

@@ -430,41 +430,54 @@ func relativeAge(_ epoch: Double, now: Double = Date().timeIntervalSince1970) ->
 // Errors decay to idle after `runningLivenessWindow` too (the dynamic island
 // spec calls out 90s for error transience — past the window, native recovery
 // wins).
+// The status a session presents *right now*, after liveness decay — the single
+// rule every "is it active" surface shares (the owl glyph via aggregateStatus,
+// the menu-bar badge, the popover RUNNING·WAITING split and "N active" label,
+// and the dynamic island via activeCount). Computing "active" three different
+// ways is how the badge, popover, and island ended up disagreeing.
+//
+//   running → only while trustedActive or within the 90s window, else idle.
+//             trustedActive disables the decay: the source is still live
+//             (native says busy/waiting now, or a Desktop hook just updated),
+//             so a long thinking turn stays running instead of flipping to idle.
+//   error   → yields to idle once aged out of its 90s window, regardless of
+//             trust, so native recovery can win (island spec §3 transience).
+//   waiting / idle → pass through unchanged.
+func effectiveStatus(_ s: Session, now: Double = Date().timeIntervalSince1970) -> Status {
+    switch s.status {
+    case .running:
+        let live = s.trustedActive || (now - s.updatedAt < runningLivenessWindow)
+        return live ? .running : .idle
+    case .error:
+        let recent = (s.errorAt ?? s.updatedAt) > now - runningLivenessWindow
+        return recent ? .error : .idle
+    default:
+        return s.status
+    }
+}
+
 func aggregateStatus(_ sessions: [Session], now: Double = Date().timeIntervalSince1970) -> Status {
     var best: Status = .idle
     for s in sessions {
-        // trustedActive disables the running decay: the source is still live
-        // (native says busy/waiting right now, or a Desktop hook just updated).
-        // Error transience still applies — a stale error always yields to
-        // recovery regardless of trust.
-        let isRecent = s.trustedActive || (now - s.updatedAt < runningLivenessWindow)
-        let errorRecent: Bool = (s.errorAt ?? s.updatedAt) > now - runningLivenessWindow
-        let effective: Status
-        switch s.status {
-        case .running: effective = isRecent ? .running : .idle
-        case .error:   effective = errorRecent ? .error : .idle
-        default:       effective = s.status
-        }
+        let effective = effectiveStatus(s, now: now)
         if effective.priority > best.priority { best = effective }
     }
     return best
 }
 
-// Sessions whose live status counts as "non-idle" for the island's count badge.
-// Same rule as `aggregateStatus`: running must be recent; error must be within
-// its 90s window. (A session that's idle natively but carries an aged-out error
-// shouldn't pad the active count.)
+// Sessions whose live status counts as "non-idle" for the count badges.
+// Shares `effectiveStatus` with aggregateStatus, so a stale-running session
+// (or one carrying an aged-out error) never pads the active count.
 func activeCount(_ sessions: [Session], now: Double = Date().timeIntervalSince1970) -> Int {
-    sessions.reduce(0) { acc, s in
-        switch s.status {
-        case .idle: return acc
-        case .running:
-            let live = s.trustedActive || (now - s.updatedAt < runningLivenessWindow)
-            return acc + (live ? 1 : 0)
-        case .error:   return acc + ((s.errorAt ?? s.updatedAt) > now - runningLivenessWindow ? 1 : 0)
-        case .waiting: return acc + 1
-        }
-    }
+    sessions.reduce(0) { $0 + (effectiveStatus($1, now: now) == .idle ? 0 : 1) }
+}
+
+// Count sessions whose decayed (effective) status equals `status` — the
+// per-status split (running vs waiting) the popover header and menu-bar badge
+// show, kept consistent with the totals from `activeCount`.
+func statusCount(_ sessions: [Session], _ status: Status,
+                 now: Double = Date().timeIntervalSince1970) -> Int {
+    sessions.reduce(0) { $0 + (effectiveStatus($1, now: now) == status ? 1 : 0) }
 }
 
 // MARK: - Dynamic Island folded label

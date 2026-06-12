@@ -588,11 +588,17 @@ func formatCount(_ n: Int) -> String {
 }
 
 // Sum the token usage across the assistant messages of a Claude Code transcript
-// (one parsed JSON object per .jsonl line). Counts input + output + both cache
-// tiers — i.e. total tokens processed by the session.
-func sessionTokenTotal(_ lines: [[String: Any]]) -> Int {
-    let keys = ["input_tokens", "output_tokens",
-                "cache_read_input_tokens", "cache_creation_input_tokens"]
+// (one parsed JSON object per .jsonl line). Counts input + output + cache
+// creation, and — by default — cache reads, i.e. total tokens processed.
+//
+// Pass includeCacheRead: false for "today" consumption: Claude Code re-reads the
+// entire cached context on every turn, so cache_read_input_tokens re-counts the
+// same prompt once per message and dominates the total (inflating it by 1–2
+// orders of magnitude over a long day). Cache creation is paid once; cache reads
+// are the cheap re-read of already-counted context.
+func sessionTokenTotal(_ lines: [[String: Any]], includeCacheRead: Bool = true) -> Int {
+    var keys = ["input_tokens", "output_tokens", "cache_creation_input_tokens"]
+    if includeCacheRead { keys.append("cache_read_input_tokens") }
     var total = 0
     for line in lines {
         guard let msg = line["message"] as? [String: Any],

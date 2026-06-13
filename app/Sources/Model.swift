@@ -410,7 +410,16 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
         }
     }
 
-    out.sort { $0.updatedAt > $1.updatedAt }
+    // Sessions needing the user's attention come first (error > waiting >
+    // running > idle, via Status.priority), then most-recent-first within a
+    // rank. A waiting Desktop session's updatedAt = transcript mtime, which
+    // stops advancing while it waits, so a pure updatedAt sort would sink the
+    // very session the user needs to act on below already-finished ones.
+    out.sort {
+        $0.status.priority != $1.status.priority
+            ? $0.status.priority > $1.status.priority
+            : $0.updatedAt > $1.updatedAt
+    }
     return out
 }
 

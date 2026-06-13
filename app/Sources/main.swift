@@ -503,6 +503,10 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
         }
         let nameLabel = NSTextField(labelWithAttributedString: nameLine)
         nameLabel.lineBreakMode = .byTruncatingMiddle
+        nameLabel.maximumNumberOfLines = 1
+        // Yield horizontally so a long folder+path truncates (middle) instead of
+        // wrapping to a second line and inflating the row height.
+        nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let (statusText, attn) = statusLine(for: s)

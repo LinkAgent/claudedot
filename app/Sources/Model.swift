@@ -576,6 +576,18 @@ func islandVariantFor(pendingTool: String?) -> IslandVariant {
     return .approval
 }
 
+// The action the user must take for a session blocked on a pending tool, plus a
+// human label for it, used to phrase the popover's approval panel. AskUserQuestion
+// wants an *answer* (not an approval); ExitPlanMode is a plan to review; every
+// other tool is an ordinary permission approval.
+func approvalPrompt(pendingTool: String?) -> (verb: String, label: String) {
+    switch pendingTool {
+    case "AskUserQuestion": return ("Answer", "question")
+    case "ExitPlanMode":    return ("Review", "plan")
+    default:                return ("Approve", pendingTool ?? "a tool")
+    }
+}
+
 // MARK: - Usage / token helpers (pure, used by the popover's usage meter)
 
 // Compact a token/count into a short human string: 950, 1.5K, 12.4M, 2.0B.

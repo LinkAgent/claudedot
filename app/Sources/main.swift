@@ -955,7 +955,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                                   let ts = o["timestamp"] as? String, ts.hasPrefix(today),
                                   let m = o["message"] as? [String: Any],
                                   let usage = m["usage"] as? [String: Any] else { continue }
-                            let t = sessionTokenTotal([["message": ["usage": usage]]])
+                            let t = sessionTokenTotal([["message": ["usage": usage]]], includeCacheRead: false)
                             tToks += t; tMsgs += 1
                             tModel[(m["model"] as? String) ?? "?", default: 0] += t
                         }

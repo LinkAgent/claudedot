@@ -184,6 +184,9 @@ let tlines: [[String: Any]] = [
     ["message": ["usage": ["input_tokens": 50.0, "output_tokens": 10.0]]], // doubles
 ]
 check("token total sums usage", sessionTokenTotal(tlines) == 100 + 20 + 5 + 3 + 50 + 10)
+// "Today" consumption excludes cache reads (re-summed every message -> inflated).
+check("token total excludes cache_read when asked",
+      sessionTokenTotal(tlines, includeCacheRead: false) == 100 + 20 + 3 + 50 + 10)
 check("token total empty", sessionTokenTotal([]) == 0)
 
 // --- pending fields parse + merge ---

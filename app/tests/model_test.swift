@@ -169,6 +169,18 @@ let m8 = mergeSessions(native: [nsess("old", "busy", age: 50), nsess("new", "bus
                        hooks: [:], now: now)
 check("sorted most-recent-first", m8.first?.id == "new")
 
+// Attention-needing sessions sort ahead of more-recently-updated ones: a
+// waiting session (older updatedAt) must outrank a busy and an idle session
+// that updated more recently, so it isn't buried in the list.
+let m8a = mergeSessions(
+    native: [nsess("idleNew", "idle", age: 0.5),
+             nsess("busyNew", "busy", age: 1),
+             nsess("waitOld", "waiting", age: 50)],
+    hooks: [:], now: now)
+check("waiting sorts ahead of newer busy/idle", m8a.first?.id == "waitOld")
+check("busy sorts ahead of newer idle", m8a[1].id == "busyNew")
+check("idle sorts last", m8a.last?.id == "idleNew")
+
 // --- formatCount ---
 check("count small", formatCount(950) == "950")
 check("count K", formatCount(1_500) == "1.5K")

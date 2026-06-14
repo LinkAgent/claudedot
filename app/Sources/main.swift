@@ -539,13 +539,13 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
             panel.translatesAutoresizingMaskIntoConstraints = false
 
             let q = NSMutableAttributedString()
-            let toolName = s.pendingTool ?? "a tool"
-            q.append(NSAttributedString(string: "Approve ", attributes: [.foregroundColor: theme.ink2, .font: ui(11)]))
+            let (verb, toolLabel) = approvalPrompt(pendingTool: s.pendingTool)
+            q.append(NSAttributedString(string: "\(verb) ", attributes: [.foregroundColor: theme.ink2, .font: ui(11)]))
             if let input = s.pendingInput, !input.isEmpty {
-                q.append(NSAttributedString(string: "\(toolName) ", attributes: [.foregroundColor: theme.ink2, .font: ui(11)]))
+                q.append(NSAttributedString(string: "\(toolLabel) ", attributes: [.foregroundColor: theme.ink2, .font: ui(11)]))
                 q.append(codePill(input, theme))
             } else {
-                q.append(NSAttributedString(string: toolName, attributes: [.foregroundColor: theme.ink, .font: ui(11, .medium)]))
+                q.append(NSAttributedString(string: toolLabel, attributes: [.foregroundColor: theme.ink, .font: ui(11, .medium)]))
             }
             let qLabel = NSTextField(labelWithAttributedString: q)
             qLabel.lineBreakMode = .byTruncatingTail

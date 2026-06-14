@@ -569,6 +569,16 @@ check("variant for Bash -> approval",
 check("variant for nil tool -> approval",
       islandVariantFor(pendingTool: nil) == .approval)
 
+// approvalPrompt phrases the action by tool kind
+check("approval verb for AskUserQuestion -> Answer",
+      approvalPrompt(pendingTool: "AskUserQuestion") == ("Answer", "question"))
+check("approval verb for ExitPlanMode -> Review plan",
+      approvalPrompt(pendingTool: "ExitPlanMode") == ("Review", "plan"))
+check("approval verb for Bash -> Approve Bash",
+      approvalPrompt(pendingTool: "Bash") == ("Approve", "Bash"))
+check("approval verb for nil tool -> Approve a tool",
+      approvalPrompt(pendingTool: nil) == ("Approve", "a tool"))
+
 // islandFocusSession picks the freshest of the relevant class
 let waiters = [
     Session(id: "old", status: .waiting, updatedAt: now - 50, pendingTool: "Bash"),

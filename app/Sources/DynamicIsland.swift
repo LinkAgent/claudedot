@@ -168,9 +168,17 @@ struct IslandGeom {
 
     // Origin: pill sits 1pt below screen top (1pt air gap), bottom lands 1pt
     // above the menu bar bottom — the "上下各 1pt 气口" contract from §2.0.
-    static func origin(on screenFrame: NSRect, size: NSSize) -> NSPoint {
+    //
+    // EXCEPTION (hasNotch=true): on a notched Mac the physical notch's top
+    // edge is at screenFrame.maxY. A 1pt top air gap exposes the notch's
+    // rounded crown above the pill ("刘海跑出来了"). Pin the pill flush with
+    // maxY instead and let the saved 1pt fall to the bottom — the notch is
+    // shorter than the pill so it remains fully contained.
+    static func origin(on screenFrame: NSRect, size: NSSize, hasNotch: Bool) -> NSPoint {
         let x = screenFrame.midX - size.width / 2
-        let y = screenFrame.maxY - airGap - size.height
+        let y = hasNotch
+            ? screenFrame.maxY - size.height
+            : screenFrame.maxY - airGap - size.height
         return NSPoint(x: x, y: y)
     }
 }
@@ -185,6 +193,10 @@ enum IslandPalette {
     static let green  = NSColor(srgbRed: 122/255, green: 155/255, blue: 118/255, alpha: 1)
     static let red    = NSColor(srgbRed: 210/255, green: 122/255, blue: 102/255, alpha: 1)
     static let border = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.10)
+    // Outer hairline ring around the whole pill — makes the "药丸" silhouette
+    // legible when the pill body is sitting flush against the (equally black)
+    // physical notch. Matches design/dynamic-island.html box-shadow alpha.
+    static let pillRing = NSColor(srgbRed: 236/255, green: 232/255, blue: 221/255, alpha: 0.22)
 
     static func dotColor(for kind: IslandLabelKind) -> NSColor {
         switch kind {
@@ -385,7 +397,7 @@ final class DynamicIslandController {
             host?.notchCoreWidth = screen.islandNotchCoreWidth
             host?.islandHeight = screen.islandHeight
             host?.update(sessions: lastSessions, layout: layout, variant: variant)
-            applyFrame(on: screen, animated: animated)
+            applyFrame(on: screen, hasNotch: hadNotch, animated: animated)
             if panel?.isVisible == false { panel?.orderFrontRegardless() }
         }
     }
@@ -449,11 +461,11 @@ final class DynamicIslandController {
         layout = l
         variant = v
         guard changed else { return }
-        guard case .visible(let screen, _) = resolveTarget() else { return }
+        guard case .visible(let screen, let hadNotch) = resolveTarget() else { return }
         host?.notchCoreWidth = screen.islandNotchCoreWidth
         host?.islandHeight = screen.islandHeight
         host?.update(sessions: lastSessions, layout: l, variant: v)
-        applyFrame(on: screen, animated: true)
+        applyFrame(on: screen, hasNotch: hadNotch, animated: true)
     }
 
     // Auto-expand to a card. Schedules its expiration timer per §6.
@@ -501,14 +513,14 @@ final class DynamicIslandController {
     }
     func cancelCollapse() { collapseWork?.cancel(); collapseWork = nil }
 
-    private func applyFrame(on screen: NSScreen, animated: Bool) {
+    private func applyFrame(on screen: NSScreen, hasNotch: Bool, animated: Bool) {
         guard let panel = panel else { return }
         let core = screen.islandNotchCoreWidth
         let h = screen.islandHeight
         let size = sizeForState(islandHeight: h, notchCoreWidth: core)
-        let origin = IslandGeom.origin(on: screen.frame, size: size)
+        let origin = IslandGeom.origin(on: screen.frame, size: size, hasNotch: hasNotch)
         let r = NSRect(origin: origin, size: size)
-        log("applyFrame layout=\(layout) variant=\(variant) screen=\(screen.frame) menuBar=\(screen.menuBarHeight) pillH=\(h) notchCore=\(core) panel=\(r)")
+        log("applyFrame layout=\(layout) variant=\(variant) hasNotch=\(hasNotch) screen=\(screen.frame) menuBar=\(screen.menuBarHeight) pillH=\(h) notchCore=\(core) panel=\(r)")
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.28
@@ -575,6 +587,12 @@ final class IslandHostView: NSView {
         let bg = CALayer()
         bg.backgroundColor = IslandPalette.bg.cgColor
         bg.masksToBounds = true
+        // Hairline ring (~1px on a 2x display = 0.5pt) drawn inside the
+        // cornerRadius — visually it's the pill's outline. Stays put across
+        // closed/expanded transitions because CALayer borders follow the
+        // current cornerRadius automatically.
+        bg.borderWidth = 1
+        bg.borderColor = IslandPalette.pillRing.cgColor
         layer?.addSublayer(bg)
         bgLayer = bg
     }

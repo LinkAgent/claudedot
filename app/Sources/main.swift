@@ -397,8 +397,10 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
     mark.append(NSAttributedString(string: "Dot", attributes: [.foregroundColor: theme.accent, .font: display(20, .semibold)]))
     let markLabel = NSTextField(labelWithAttributedString: mark)
     markLabel.translatesAutoresizingMaskIntoConstraints = false
-    let runCount = sessions.filter { $0.s.status == .running }.count
-    let waitCount = sessions.filter { $0.s.status == .waiting }.count
+    // Decay stale-running sessions (effectiveStatus) so this split matches the
+    // owl glyph, the menu-bar badge, and the "N active" label below.
+    let runCount = statusCount(sessions.map { $0.s }, .running)
+    let waitCount = statusCount(sessions.map { $0.s }, .waiting)
     let rightStack = NSStackView(views: [
         capLabel("RUNNING · WAITING", theme, .right),
         label("\(runCount) · \(waitCount)", mono(12, .medium), theme.ink, .right),
@@ -469,7 +471,7 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
     add(divider())
 
     // ── 3) SESSIONS LIST ──
-    let active = sessions.filter { $0.s.status != .idle }.count
+    let active = activeCount(sessions.map { $0.s })
     let cap = NSStackView(views: [
         capLabel("SESSIONS", theme),
         NSView(),
@@ -1013,8 +1015,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         maybeProbe()
         let sessions = loadSessions()
         let agg = aggregateStatus(sessions)
-        let attention = sessions.filter { $0.status == .error || $0.status == .waiting }.count
-        let running = sessions.filter { $0.status == .running && Date().timeIntervalSince1970 - $0.updatedAt < 90 }.count
+        // Same decayed-status rule as the popover and island (see effectiveStatus)
+        // so the badge can't disagree with the owl glyph or the popover counts.
+        let attention = sessions.filter { let e = effectiveStatus($0); return e == .error || e == .waiting }.count
+        let running = statusCount(sessions, .running)
         statusItem.button?.image = statusIcon(for: agg, diameter: menuBarIconSize,
                                               appearance: statusItem.button?.effectiveAppearance)
         statusItem.button?.title = attention > 0 ? " \(attention)" : (running > 0 ? " \(running)" : "")

@@ -490,7 +490,12 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
         list.addArrangedSubview(pad(empty, 6, 10, 10, 10))
     }
 
-    for vm in sessions {
+    // Cap the visible rows so a long backlog can't push the footer off-screen;
+    // sessions are pre-sorted (attention first, then most recent) so the head is
+    // the relevant slice. The hidden tail is surfaced via a "+N more" hint.
+    let rowCap = 10
+    let visibleSessions = Array(sessions.prefix(rowCap))
+    for vm in visibleSessions {
         let s = vm.s
         let row = HoverRow(theme: theme)
         row.onClick = { handlers.jump(s.pid, s.cwd, s.isDesktop) }
@@ -571,6 +576,10 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
             list.addArrangedSubview(box)
             box.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true
         }
+    }
+    if sessions.count > visibleSessions.count {
+        let more = label("+\(sessions.count - visibleSessions.count) more", ui(11), theme.ink3)
+        list.addArrangedSubview(pad(more, 6, 12, 8, 12))
     }
     add(pad(list, 0, 8, 6, 8))
 

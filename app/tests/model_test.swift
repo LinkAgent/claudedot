@@ -242,6 +242,25 @@ let mp = mergeSessions(native: [nsess("a", "waiting")],
                                             pendingInput: "npm run build")], now: now)
 check("merge carries pending", mp.first?.pendingInput == "npm run build")
 
+// --- Notification kind (Needs-You variant) ---
+let sPerm = Session(json: ["session_id": "n", "status": "waiting",
+                           "notify_kind": "permission_prompt", "updated_at": now])
+check("session parses notify_kind", sPerm?.notifyKind == "permission_prompt")
+check("permission_prompt -> .permission variant", notifyVariant(sPerm?.notifyKind) == .permission)
+let sIdle = Session(json: ["session_id": "n2", "status": "idle",
+                           "notify_kind": "idle_prompt", "updated_at": now])
+check("idle_prompt -> .idle variant", notifyVariant(sIdle?.notifyKind) == .idle)
+check("missing notify_kind -> .none variant", notifyVariant(nil) == .none)
+check("unknown notify_kind -> .none variant", notifyVariant("auth_success") == .none)
+check("session without notify_kind parses nil",
+      Session(json: ["session_id": "n3", "status": "idle"])?.notifyKind == nil)
+// merge carries the hook's notify_kind onto a native-driven row.
+let mNotify = mergeSessions(
+    native: [nsess("a", "waiting")],
+    hooks: ["a": Session(id: "a", cwd: "/a/a", status: .waiting, updatedAt: now,
+                         notifyKind: "permission_prompt")], now: now)
+check("merge carries notify_kind", mNotify.first?.notifyKind == "permission_prompt")
+
 // --- DesktopSession parsing ---
 let d0 = DesktopSession(json: [
     "cliSessionId": "cs1", "cwd": "/Users/me/proj", "title": "dev - x",

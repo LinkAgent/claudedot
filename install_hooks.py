@@ -18,17 +18,25 @@ TAG = "cc-statusbar"  # marker stored on each entry we add
 # our hooks by command-path substring so re-running install dedupes them.
 HOOK_BASENAME = "cc_statusbar_hook.py"
 
-# Events we hook, and whether they take a tool matcher.
+# Events we hook, and the matcher(s) each is registered under. Each value is a
+# list of matchers: None = a group with no matcher key; "*" = a wildcard group.
+# Notification is split per matcher so we can tell a permission request apart
+# from an idle nudge — the matcher name is passed through to the hook as
+# --notify-kind (the payload itself carries no notification_type). A trailing
+# "*" group is the safety net for any other Notification matcher.
 EVENTS = {
-    "SessionStart": False,
-    "UserPromptSubmit": False,
-    "PreToolUse": True,
-    "PostToolUse": True,
-    "Notification": False,
-    "Stop": False,
-    "SubagentStop": False,
-    "SessionEnd": False,
+    "SessionStart": [None],
+    "UserPromptSubmit": [None],
+    "PreToolUse": ["*"],
+    "PostToolUse": ["*"],
+    "Notification": ["permission_prompt", "idle_prompt", "*"],
+    "Stop": [None],
+    "SubagentStop": [None],
+    "SessionEnd": [None],
 }
+
+# Notification matchers whose name is forwarded to the hook as --notify-kind.
+NOTIFY_KIND_MATCHERS = {"permission_prompt", "idle_prompt"}
 
 
 def load():
@@ -84,14 +92,18 @@ def strip_ours(groups):
 def install(command):
     data = load()
     hooks = data.setdefault("hooks", {})
-    for event, has_matcher in EVENTS.items():
+    for event, matchers in EVENTS.items():
         groups = hooks.get(event, [])
         groups = strip_ours(groups)  # remove stale copies first (idempotent)
-        entry = {"type": "command", "command": command, "_tag": TAG}
-        if has_matcher:
-            groups.append({"matcher": "*", "hooks": [entry]})
-        else:
-            groups.append({"hooks": [entry]})
+        for matcher in matchers:
+            cmd = command
+            if event == "Notification" and matcher in NOTIFY_KIND_MATCHERS:
+                cmd = f"{command} --notify-kind {matcher}"
+            entry = {"type": "command", "command": cmd, "_tag": TAG}
+            if matcher is None:
+                groups.append({"hooks": [entry]})
+            else:
+                groups.append({"matcher": matcher, "hooks": [entry]})
         hooks[event] = groups
     save(data)
     print(f"Installed status-bar hooks for {len(EVENTS)} events into {SETTINGS}")
@@ -128,7 +140,8 @@ def diagnose():
     hooks = data.get("hooks", {})
     problems = 0
     print(f"settings: {SETTINGS}")
-    for event in EVENTS:
+    for event, matchers in EVENTS.items():
+        expected = len(matchers)
         groups = hooks.get(event, [])
         ours_count = 0
         tagged = 0
@@ -145,10 +158,10 @@ def diagnose():
         if ours_count == 0:
             flag = " MISSING"
             problems += 1
-        elif ours_count > 1:
-            flag = f" DUPLICATE ({tagged} tagged, {legacy} legacy)"
+        elif ours_count > expected:
+            flag = f" DUPLICATE ({tagged} tagged, {legacy} legacy, expected {expected})"
             problems += 1
-        print(f"  {event:<18s} {ours_count} ours{flag}")
+        print(f"  {event:<18s} {ours_count}/{expected} ours{flag}")
     if problems:
         print(f"{problems} problem(s) — run install_hooks.py <command> to repair.")
         sys.exit(1)

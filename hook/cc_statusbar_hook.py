@@ -24,6 +24,8 @@ State file schema (one per active session):
   "updated_at": float,      # epoch seconds
   "pending_tool": str|null, # tool awaiting approval (set on PreToolUse)
   "pending_input": str|null,# short summary of that tool's input
+  "notify_kind": str|null,  # Notification matcher: "permission_prompt" |
+                            #   "idle_prompt" | null (unspecified `*` fallback)
   "ended": bool             # set on SessionEnd
 }
 """
@@ -148,6 +150,7 @@ def compute_update(payload, prev):
     state.setdefault("error_at", None)
     state.setdefault("pending_tool", None)
     state.setdefault("pending_input", None)
+    state.setdefault("notify_kind", None)
     state["ended"] = False
 
     def clear_pending():
@@ -160,6 +163,7 @@ def compute_update(payload, prev):
         # Fresh session: clear any stale error.
         state["last_error"] = None
         state["error_at"] = None
+        state["notify_kind"] = None
         clear_pending()
 
     elif event == "UserPromptSubmit":
@@ -172,6 +176,7 @@ def compute_update(payload, prev):
         # New turn: clear the previous turn's error.
         state["last_error"] = None
         state["error_at"] = None
+        state["notify_kind"] = None
         clear_pending()
 
     elif event == "PreToolUse":
@@ -205,8 +210,23 @@ def compute_update(payload, prev):
         clear_pending()
 
     elif event == "Notification":
+        # Notification is the precise "Needs You" signal, but Claude Code's
+        # payload carries no notification_type (anthropics/claude-code#11964).
+        # install_hooks.py registers one hook per matcher and passes the matcher
+        # name through as --notify-kind, surfaced here on the payload, so we can
+        # tell an urgent permission ask from a gentle idle nudge.
         msg = payload.get("message", "needs your attention")
-        state["status"] = "waiting"
+        kind = payload.get("_notify_kind")
+        state["notify_kind"] = kind
+        if kind == "idle_prompt":
+            # Idle reminder: the session is just sitting waiting for input. Keep
+            # it calm (idle) so it doesn't light the owl yellow / sound urgent
+            # like a real permission request does.
+            state["status"] = "idle"
+        else:
+            # permission_prompt, or the unspecified `*` fallback: an explicit ask
+            # that blocks the agent — urgent, show waiting.
+            state["status"] = "waiting"
         state["last_event"] = _truncate(msg, 100)
 
     elif event == "Stop":
@@ -240,12 +260,34 @@ def compute_update(payload, prev):
     return state
 
 
+def _arg_value(argv, flag):
+    """Tiny argv reader (avoids argparse, which can raise/print on bad input —
+    the hook must never write to stdout or exit non-zero). Supports
+    `--flag value` and `--flag=value`; returns None when absent."""
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(flag + "="):
+            return a[len(flag) + 1:]
+    return None
+
+
 def main():
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         payload = {}
+
+    # Notification hooks are registered per-matcher and pass the matcher name as
+    # --notify-kind (see install_hooks.py), since the payload itself omits it.
+    try:
+        if isinstance(payload, dict):
+            kind = _arg_value(sys.argv[1:], "--notify-kind")
+            if kind is not None:
+                payload.setdefault("_notify_kind", kind)
+    except Exception:
+        pass
 
     try:
         session_id = payload.get("session_id", "unknown")

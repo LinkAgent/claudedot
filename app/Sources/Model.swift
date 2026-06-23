@@ -56,6 +56,12 @@ struct Session {
     // PreToolUse. Drives the approval panel's "pending action" line.
     var pendingTool: String?
     var pendingInput: String?
+    // For a Notification-driven "needs you" state, which matcher fired:
+    // "permission_prompt" (urgent permission ask) vs "idle_prompt" (a gentle
+    // idle nudge). nil when not from a Notification or matcher unspecified.
+    // Set by the hook via --notify-kind; lets the UI phrase / sound the two
+    // Needs-You variants differently. See `notifyVariant`.
+    var notifyKind: String?
     // True for Claude Desktop (Cowork / agent-mode) sessions. They can't be
     // focused via a terminal/tty or resolved remotely — jump just brings the
     // desktop app forward (see `jump` in main.swift).
@@ -84,6 +90,7 @@ struct Session {
         self.updatedAt = (json["updated_at"] as? Double) ?? 0
         self.pendingTool = json["pending_tool"] as? String
         self.pendingInput = json["pending_input"] as? String
+        self.notifyKind = json["notify_kind"] as? String
     }
 
     // Test-friendly memberwise initializer.
@@ -91,11 +98,13 @@ struct Session {
          title: String = "", lastEvent: String = "", lastError: String? = nil,
          errorAt: Double? = nil, updatedAt: Double, pid: Int32? = nil,
          pendingTool: String? = nil, pendingInput: String? = nil,
+         notifyKind: String? = nil,
          isDesktop: Bool = false, trustedActive: Bool = false) {
         self.id = id; self.folder = folder; self.cwd = cwd; self.status = status
         self.title = title; self.lastEvent = lastEvent; self.lastError = lastError
         self.errorAt = errorAt; self.updatedAt = updatedAt; self.pid = pid
         self.pendingTool = pendingTool; self.pendingInput = pendingInput
+        self.notifyKind = notifyKind
         self.isDesktop = isDesktop; self.trustedActive = trustedActive
     }
 }
@@ -356,6 +365,7 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
                            title: title, lastEvent: lastEvent, lastError: h?.lastError,
                            errorAt: h?.errorAt, updatedAt: updated, pid: n.pid,
                            pendingTool: h?.pendingTool, pendingInput: h?.pendingInput,
+                           notifyKind: h?.notifyKind,
                            isDesktop: n.entrypoint == "claude-desktop",
                            trustedActive: trusted))
     }
@@ -607,6 +617,23 @@ func approvalPrompt(pendingTool: String?) -> (verb: String, label: String) {
     case "AskUserQuestion": return ("Answer", "question")
     case "ExitPlanMode":    return ("Review", "plan")
     default:                return ("Approve", pendingTool ?? "a tool")
+    }
+}
+
+// The two flavors of a Notification-driven "Needs You" state, distinguished by
+// the matcher the hook recorded in `notify_kind`:
+//   • permission — an explicit permission request that blocks the agent. Urgent:
+//     lights the owl yellow, like any waiting session.
+//   • idle       — a gentle "you've been idle" nudge. Calm: doesn't demand an
+//     immediate decision, so it shouldn't read as loudly as a permission ask.
+// Anything else (no Notification, or an unrecognized matcher) is `.none`.
+enum NotifyVariant { case none, permission, idle }
+
+func notifyVariant(_ notifyKind: String?) -> NotifyVariant {
+    switch notifyKind {
+    case "permission_prompt": return .permission
+    case "idle_prompt":       return .idle
+    default:                  return .none
     }
 }
 

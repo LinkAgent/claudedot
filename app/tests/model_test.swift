@@ -51,6 +51,22 @@ let trustedStale = Session(id: "t", status: .running,
                             updatedAt: now - 600, trustedActive: true)
 check("trustedActive running stays running past window",
       aggregateStatus([trustedStale], now: now) == .running)
+
+// --- badgeCount: number next to the owl matches the glyph state ---
+check("badge empty -> 0", badgeCount([], now: now) == 0)
+check("badge idle-only -> 0", badgeCount([sess(.idle, age: 1)], now: now) == 0)
+// Glyph green (running) -> running count, not the idle ones.
+check("badge running -> running count",
+      badgeCount([sess(.running, age: 1), sess(.running, age: 1), sess(.idle, age: 1)], now: now) == 2)
+// Glyph yellow (needs input) -> waiting + done, and it beats running.
+check("badge needs-input -> waiting+done, over running",
+      badgeCount([sess(.waiting, age: 1), sess(.done, age: 1), sess(.running, age: 1)], now: now) == 2)
+// Glyph red (error) -> error count only.
+check("badge error -> error count only",
+      badgeCount([sess(.error, age: 1), sess(.waiting, age: 1), sess(.running, age: 1)], now: now) == 1)
+// done-only (no waiting) still counts under the yellow glyph.
+check("badge done-only -> done count",
+      badgeCount([sess(.done, age: 1), sess(.done, age: 1)], now: now) == 2)
 check("trustedActive running counts as active",
       activeCount([trustedStale], now: now) == 1)
 check("untrusted stale running drops from activeCount",
@@ -144,9 +160,11 @@ check("native busy is trustedActive",
       m1.first(where: { $0.id == "a" })?.trustedActive == true)
 check("native waiting is trustedActive",
       m1.first(where: { $0.id == "b" })?.trustedActive == true)
+// An idle terminal (claude open, doing nothing) is NOT one of the two surfaced
+// categories (running / needs-handling) — it's hidden so the list mirrors the
+// current Claude state instead of accumulating idle rows.
 let m1Idle = mergeSessions(native: [nsess("idle", "idle")], hooks: [:], now: now)
-check("native idle is NOT trustedActive",
-      m1Idle.first?.trustedActive == false)
+check("native idle session is hidden", m1Idle.isEmpty)
 // A native busy session whose updatedAt is ancient still stays running in the
 // aggregate — this is the "model is thinking for minutes" case.
 let m1Old = mergeSessions(native: [nsess("a", "busy", age: 600)], hooks: [:], now: now)
@@ -207,9 +225,9 @@ let m8a = mergeSessions(
              nsess("busyNew", "busy", age: 1),
              nsess("waitOld", "waiting", age: 50)],
     hooks: [:], now: now)
-check("waiting sorts ahead of newer busy/idle", m8a.first?.id == "waitOld")
-check("busy sorts ahead of newer idle", m8a[1].id == "busyNew")
-check("idle sorts last", m8a.last?.id == "idleNew")
+check("waiting sorts ahead of newer busy", m8a.first?.id == "waitOld")
+check("busy kept, sorts after waiting", m8a.count == 2 && m8a[1].id == "busyNew")
+check("idle session dropped from the list", !m8a.contains { $0.id == "idleNew" })
 
 // --- formatCount ---
 check("count small", formatCount(950) == "950")
@@ -272,16 +290,98 @@ check("tail clears after tool_result", transcriptPendingTool(answeredLines) == n
 check("tail empty -> no pending", transcriptPendingTool([]) == nil)
 check("tail surfaces user-blocking tool", transcriptPendingTool(askLines) == "AskUserQuestion")
 
-check("fresh + executing tool -> running (not waiting)",
-      inferDesktopStatus(pendingTool: "Bash", mtime: now - 5, now: now) == .running)
-check("fresh + no pending -> running",
-      inferDesktopStatus(pendingTool: nil, mtime: now - 5, now: now) == .running)
-check("stale generic pending -> idle",
-      inferDesktopStatus(pendingTool: "Bash", mtime: now - 200, now: now) == .idle)
-check("stale AskUserQuestion -> still waiting (blocked on user)",
-      inferDesktopStatus(pendingTool: "AskUserQuestion", mtime: now - 99999, now: now) == .waiting)
-check("stale ExitPlanMode -> still waiting",
-      inferDesktopStatus(pendingTool: "ExitPlanMode", mtime: now - 99999, now: now) == .waiting)
+// --- classifyTail: distinguish finished from running (issue #31) ---
+let finishedLines: [[String: Any]] = [
+    ["message": ["role": "user", "content": [["type": "text", "text": "hi"]]]],
+    ["message": ["role": "assistant", "content": [["type": "text", "text": "已完成，测试通过，已合并。"]]]],
+]
+let askingLines: [[String: Any]] = [
+    ["message": ["role": "user", "content": [["type": "text", "text": "hi"]]]],
+    ["message": ["role": "assistant", "content": [["type": "text", "text": "做完了。要我接着补 30 天消费列吗？"]]]],
+]
+check("classify executing tool", classifyTail(toolUseLines) == .runningTool("Bash"))
+check("classify blocking tool", classifyTail(askLines) == .blocking("AskUserQuestion"))
+check("classify finished completion (no question)", classifyTail(finishedLines) == .finished)
+check("classify finished ASKING (ends with ?)", classifyTail(askingLines) == .finishedAsking)
+check("classify user turn (after tool_result)", classifyTail(answeredLines) == .userTurn)
+check("classify empty -> none", classifyTail([]) == .none)
+
+// textEndsAsking heuristic
+check("ends asking: 问号 question", textEndsAsking("做完了。要我继续吗？"))
+check("ends asking: ascii ?", textEndsAsking("done. want me to continue?"))
+check("not asking: completion", !textEndsAsking("已完成，测试通过，已合并。"))
+check("not asking: ? not on last line",
+      !textEndsAsking("要我继续吗？\n好的，已经帮你做完了。"))
+
+// KEY REGRESSION (issue #31): a turn that just finished has a FRESH file but is
+// NOT running. A plain completion is hidden; one that ends asking → needs input.
+check("fresh completed turn is NOT running", inferDesktopStatus(tail: .finished, mtime: now - 5, now: now) != .running)
+check("fresh completed turn is idle (does NOT need input)",
+      inferDesktopStatus(tail: .finished, mtime: now - 5, now: now) == .idle)
+check("fresh asking turn (engaged) -> done (needs input)",
+      inferDesktopStatus(tail: .finishedAsking, mtime: now - 5, lastFocusedAt: now - 60, now: now) == .done)
+// Engagement gate: a question in a session you ABANDONED days ago (a background
+// loop wrote it) is NOT awaiting you → hidden, even though the write is recent.
+check("asking but abandoned (focused days ago) -> idle",
+      inferDesktopStatus(tail: .finishedAsking, mtime: now - 300, lastFocusedAt: now - 8 * 86400, now: now) == .idle)
+check("asking but never focused -> idle",
+      inferDesktopStatus(tail: .finishedAsking, mtime: now - 300, lastFocusedAt: 0, now: now) == .idle)
+
+check("fresh executing tool -> running",
+      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - 5, now: now) == .running)
+check("stale executing tool -> idle (stalled, not finished)",
+      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - 200, now: now) == .idle)
+check("fresh user turn -> running (agent about to continue)",
+      inferDesktopStatus(tail: .userTurn, mtime: now - 5, now: now) == .running)
+check("stale user turn -> idle",
+      inferDesktopStatus(tail: .userTurn, mtime: now - 200, now: now) == .idle)
+check("blocking AskUserQuestion -> waiting (no matter how quiet)",
+      inferDesktopStatus(tail: .blocking("AskUserQuestion"), mtime: now - 99999, now: now) == .waiting)
+check("blocking ExitPlanMode -> waiting",
+      inferDesktopStatus(tail: .blocking("ExitPlanMode"), mtime: now - 99999, now: now) == .waiting)
+// Asking turn (engaged recently) → "Needs input" within the 24h window.
+check("asking + recent + engaged -> done (needs input)",
+      inferDesktopStatus(tail: .finishedAsking, mtime: now - 300, lastFocusedAt: now - 300, now: now) == .done)
+check("asking within 24h + engaged -> done",
+      inferDesktopStatus(tail: .finishedAsking, mtime: now - 20 * 3600, lastFocusedAt: now - 20 * 3600, now: now) == .done)
+check("asking beyond 24h -> idle (history)",
+      inferDesktopStatus(tail: .finishedAsking, mtime: now - (desktopNeedsInputWindow + 10), lastFocusedAt: now - 60, now: now) == .idle)
+check("completed turn hours ago -> idle (not needs input)",
+      inferDesktopStatus(tail: .finished, mtime: now - 2 * 3600, now: now) == .idle)
+check("none -> idle", inferDesktopStatus(tail: .none, mtime: now - 5, now: now) == .idle)
+
+// --- Notification kind parsing (issue #30) ---
+let sPerm = Session(json: ["session_id": "n1", "status": "waiting",
+                           "notify_kind": "permission_prompt", "updated_at": now])!
+check("session parses permission_prompt", sPerm.notifyKind == "permission_prompt")
+let sIdle = Session(json: ["session_id": "n2", "status": "idle",
+                           "notify_kind": "idle_prompt", "updated_at": now])!
+check("session parses idle_prompt", sIdle.notifyKind == "idle_prompt")
+let sNoKind = Session(json: ["session_id": "n3", "status": "idle", "updated_at": now])!
+check("session notify_kind nil when absent", sNoKind.notifyKind == nil)
+
+// --- welcome-page parity: scheduled exclusion + 24h window (issue #32) ---
+let dSched = DesktopSession(json: ["cliSessionId": "s1", "cwd": "/a",
+                                   "scheduledTaskId": "github-issue-bugfix-bot",
+                                   "lastActivityAt": (now - 60) * 1000])!
+check("parses scheduledTaskId -> isScheduled", dSched.isScheduled == true)
+let dInter = DesktopSession(json: ["cliSessionId": "s2", "cwd": "/a",
+                                   "lastActivityAt": (now - 60) * 1000])!
+check("interactive not scheduled", dInter.isScheduled == false)
+
+let kept = filterWelcomeSessions([dSched, dInter], now: now)
+check("scheduled excluded", !kept.contains { $0.sessionId == "s1" })
+check("interactive kept", kept.contains { $0.sessionId == "s2" })
+
+let dOld = DesktopSession(sessionId: "s3", cwd: "/a", status: .done, updatedAt: now - 25 * 3600)
+let dRecent = DesktopSession(sessionId: "s4", cwd: "/a", status: .done, updatedAt: now - 23 * 3600)
+check("beyond 24h dropped", !filterWelcomeSessions([dOld], now: now).contains { $0.sessionId == "s3" })
+check("within 24h kept", filterWelcomeSessions([dRecent], now: now).contains { $0.sessionId == "s4" })
+// A blocked-on-you session stays regardless of age.
+let dWaitOld = DesktopSession(sessionId: "s5", cwd: "/a", status: .waiting, updatedAt: now - 99 * 3600)
+check("waiting kept regardless of age", filterWelcomeSessions([dWaitOld], now: now).contains { $0.sessionId == "s5" })
+
+check("desktop window is 24h", desktopDoneWindow == 24 * 3600)
 
 // --- mergeSessions with desktop ---
 func dsess(_ id: String, _ st: Status, age: Double = 1) -> DesktopSession {
@@ -332,13 +432,60 @@ check("desktop+hook: flagged isDesktop",
       md8.first?.isDesktop == true)
 check("desktop+hook running is trustedActive",
       md8.first?.trustedActive == true)
-// Even when hook says idle, the live native pid means the row is worth showing —
-// hook idle on a desktop entry means "done, awaiting input", not "gone".
+// A Desktop entry whose only signal is an idle hook (no transcript-grounded
+// status) is finished-with-nothing-to-show → hidden. The transcript scan is what
+// promotes a finished session to .done ("needs review"); a bare idle hook does not.
 let md9 = mergeSessions(native: [ndesk("dk3")],
                         hooks: ["dk3": hsess("dk3", .idle, age: 1)],
                         desktop: [], now: now)
-check("desktop+idle hook still surfaces the live row",
-      md9.count == 1 && md9.first?.status == .idle && md9.first?.pid == 777)
+check("desktop+idle-hook (no transcript) is hidden", md9.isEmpty)
+// Issue #31: a STALE hook stuck at running (no transcript-grounded row) must not
+// keep a desktop session green — a missed Stop shouldn't pin it "working".
+let md9stale = mergeSessions(native: [ndesk("dk4")],
+                             hooks: ["dk4": hsess("dk4", .running, age: 9999)],
+                             desktop: [], now: now)
+check("desktop+stale-running-hook (no transcript) is hidden", md9stale.isEmpty)
+
+// --- done ("Needs input") surfacing + transcript-grounded status ---
+// A .done desktop session (finished, your turn) is surfaced + trustedActive, and
+// now LIGHTS the owl as "Needs input" (welcome parity) — priority 1, above idle.
+let mDone = mergeSessions(native: [ndesk("dn")], hooks: [:],
+                          desktop: [dsess("dn", .done, age: 300)], now: now)
+check("done desktop session surfaced", mDone.count == 1 && mDone.first?.status == .done)
+check("done carries native pid", mDone.first?.pid == 777)
+check("done is trustedActive (survives decay)", mDone.first?.trustedActive == true)
+check("done lights the aggregate glyph as needs-input", aggregateStatus(mDone, now: now) == .done)
+// ...but running outranks done (active task stays the headline).
+check("running outranks done in aggregate",
+      aggregateStatus([sess(.running, age: 1), sess(.done, age: 1)], now: now) == .running)
+// ...and an urgent waiting (approval) outranks done.
+check("waiting outranks done in aggregate",
+      aggregateStatus([sess(.done, age: 1), sess(.waiting, age: 1)], now: now) == .waiting)
+// Transcript-grounded status WINS over a stale hook: hook stuck at running, but
+// the transcript scan says the turn finished → done.
+let mGround = mergeSessions(native: [ndesk("g")],
+                            hooks: ["g": hsess("g", .running, age: 9999)],
+                            desktop: [dsess("g", .done, age: 200)], now: now)
+check("transcript-grounded done overrides stale hook running",
+      mGround.count == 1 && mGround.first?.status == .done)
+// Issue #31 acceptance: a session that just finished must NOT pad the running
+// count, even with a stale hook stuck at running.
+check("finished desktop contributes 0 to running count",
+      statusCount(mGround, .running, now: now) == 0)
+// ...but a FRESH hook running upgrades a transcript "done" back to running: an
+// actively-working session that momentarily wrote text must still count as
+// running (don't under-report the running tasks Claude shows as live).
+let mActive = mergeSessions(native: [ndesk("a")],
+                            hooks: ["a": hsess("a", .running, age: 2)],
+                            desktop: [dsess("a", .done, age: 2)], now: now)
+check("fresh hook running upgrades transcript-done to running",
+      mActive.count == 1 && mActive.first?.status == .running)
+check("two fresh-hook-running desktop sessions both count",
+      statusCount(mergeSessions(native: [ndesk("a"), ndesk("b")],
+                                hooks: ["a": hsess("a", .running, age: 2),
+                                        "b": hsess("b", .running, age: 2)],
+                                desktop: [dsess("a", .done, age: 2), dsess("b", .done, age: 2)],
+                                now: now), .running, now: now) == 2)
 
 // Fresh-Desktop fallback: native claude-desktop entry, no hook, no transcript
 // (so loadDesktop's desktop list omits it), but startedAt is within the last
@@ -430,11 +577,18 @@ let staleWait = Session(id: "x", status: .waiting, updatedAt: now - 99999)
 check("stale waiting persists in aggregate",
       aggregateStatus([staleWait], now: now) == .waiting)
 
-// inferDesktopStatus boundary at exactly the liveness window (>=, not >):
-check("inferDesktopStatus exactly at 90s -> idle",
-      inferDesktopStatus(pendingTool: nil, mtime: now - runningLivenessWindow, now: now) == .idle)
-check("inferDesktopStatus just under 90s -> running",
-      inferDesktopStatus(pendingTool: nil, mtime: now - (runningLivenessWindow - 1), now: now) == .running)
+// inferDesktopStatus liveness boundary (>=, not >) governs an EXECUTING tail:
+// at exactly 90s it's stale → idle; just under → running.
+check("executing tail exactly at 90s -> idle (stalled)",
+      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - runningLivenessWindow, now: now) == .idle)
+check("executing tail just under 90s -> running",
+      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - (runningLivenessWindow - 1), now: now) == .running)
+// A finished tail is never "running" no matter how fresh: a completed turn is
+// idle (hidden), one that ends asking is "needs input" (done) — never running.
+check("fresh completed tail -> idle (never running)",
+      inferDesktopStatus(tail: .finished, mtime: now - (runningLivenessWindow - 1), now: now) == .idle)
+check("fresh asking tail (engaged) -> done (never running)",
+      inferDesktopStatus(tail: .finishedAsking, mtime: now - (runningLivenessWindow - 1), lastFocusedAt: now - 60, now: now) == .done)
 
 // NativeSession with no updatedAt parses but defaults to 0.
 let natNoUp = NativeSession(json: ["sessionId": "x", "pid": 1, "status": "busy"])

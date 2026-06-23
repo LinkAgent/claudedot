@@ -337,6 +337,58 @@ def test_install_hooks_preserves_user_hooks():
                       for hh in g.get("hooks", [])))
 
 
+def test_notification_kind():
+    """Notification subdivides into urgent permission vs gentle idle (issue #30)."""
+    print("Notification matcher kind:")
+    # permission_prompt -> urgent Needs You (waiting) + kind recorded.
+    st = h.compute_update(ev("Notification", message="Claude needs your permission to use Bash",
+                             _notify_kind="permission_prompt"), {})
+    check("permission -> waiting", st["status"] == "waiting")
+    check("permission -> kind recorded", st["notify_kind"] == "permission_prompt")
+
+    # idle_prompt -> gentle, NOT the urgent waiting state.
+    st = h.compute_update(ev("Notification", message="Claude is waiting for your input",
+                             _notify_kind="idle_prompt"), {})
+    check("idle -> not waiting (calm)", st["status"] != "waiting")
+    check("idle -> kind recorded", st["notify_kind"] == "idle_prompt")
+
+    # No --notify-kind arg: classify from message text; default urgent.
+    st = h.compute_update(ev("Notification", message="Claude needs your permission to use Write"), {})
+    check("no-kind permission text -> waiting", st["status"] == "waiting")
+    check("no-kind permission text -> permission_prompt",
+          st["notify_kind"] == "permission_prompt")
+    st = h.compute_update(ev("Notification", message="Claude is waiting for your input"), {})
+    check("no-kind idle text -> idle_prompt", st["notify_kind"] == "idle_prompt")
+    check("no-kind idle text -> not waiting", st["status"] != "waiting")
+
+    # notify_kind clears on the next non-Notification event.
+    st = h.compute_update(ev("PreToolUse", tool_name="Bash"), st)
+    check("notify_kind clears on next event", st.get("notify_kind") is None)
+    check("notify_kind always in schema", "notify_kind" in st)
+
+
+def test_install_notification_matchers():
+    """Notification is registered with a permission_prompt and an idle_prompt
+    matcher, each passing the kind on the command line (issue #30)."""
+    print("install_hooks Notification matchers:")
+    install_path = os.path.join(os.path.dirname(__file__), "..", "install_hooks.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, HOME=tmp)
+        for _ in range(2):  # idempotent: still exactly two groups after re-install
+            subprocess.run([sys.executable, install_path, "/tmp/cc_statusbar_hook.py"],
+                           env=env, capture_output=True, text=True, timeout=10)
+        with open(os.path.join(tmp, ".claude", "settings.json")) as f:
+            data = json.load(f)
+        groups = data["hooks"]["Notification"]
+        matchers = {g.get("matcher") for g in groups}
+        check("registers permission_prompt matcher", "permission_prompt" in matchers)
+        check("registers idle_prompt matcher", "idle_prompt" in matchers)
+        check("idempotent: exactly two notification groups", len(groups) == 2)
+        cmds = " ".join(hh["command"] for g in groups for hh in g["hooks"])
+        check("passes --notify-kind permission_prompt", "--notify-kind permission_prompt" in cmds)
+        check("passes --notify-kind idle_prompt", "--notify-kind idle_prompt" in cmds)
+
+
 if __name__ == "__main__":
     test_transitions()
     test_pending_capture()
@@ -350,6 +402,8 @@ if __name__ == "__main__":
     test_state_path_sanitization()
     test_compute_update_edges()
     test_install_hooks_idempotency()
+    test_notification_kind()
+    test_install_notification_matchers()
     test_install_hooks_preserves_user_hooks()
     print()
     if FAILURES:

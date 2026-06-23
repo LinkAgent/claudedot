@@ -4,15 +4,25 @@
 import Foundation
 
 enum Status: String {
-    case running, waiting, error, idle
+    // running  = the agent is actively working.
+    // waiting  = blocked on the user RIGHT NOW (approval / a question) — urgent.
+    // done     = finished a turn, the result awaits your review (a Desktop session
+    //            you haven't opened yet). Surfaced in the list as "needs review"
+    //            but deliberately CALM: it does not light the menu-bar glyph the way
+    //            an urgent `waiting` does (see Status.priority / aggregateStatus).
+    // error    = a tool failed.
+    // idle     = nothing to show; hidden from the list entirely.
+    case running, waiting, done, error, idle
 
     // Fallback glyphs (the app draws flat colored dots; these keep the model
     // self-describing and are used by headless contexts/tests). Color scheme:
-    // running = green, needs-input = yellow, error = red, idle = neutral.
+    // running = green, needs-input = yellow, done = green-check, error = red,
+    // idle = neutral.
     var emoji: String {
         switch self {
         case .running: return "🟢"
         case .waiting: return "🟡"
+        case .done:    return "✅"
         case .error:   return "🔴"
         case .idle:    return "⚪️"
         }
@@ -22,17 +32,24 @@ enum Status: String {
         switch self {
         case .running: return "Running"
         case .waiting: return "Needs input"
+        case .done:    return "Needs input"
         case .error:   return "Error"
         case .idle:    return "Idle"
         }
     }
 
-    // Priority for choosing the aggregate icon. Higher wins.
+    // Priority for choosing the aggregate icon and sort order. Higher wins.
+    // `done` ("Needs input" — the agent finished its turn and it's YOUR turn to
+    // reply, exactly what Claude Desktop's welcome page labels "Needs input") sits
+    // ABOVE idle so it lights the owl glyph + counts in the badge, but BELOW
+    // running so an actively-working session still sorts to the top. Urgent
+    // `waiting` (a pending approval / question) outranks it.
     var priority: Int {
         switch self {
-        case .error:   return 3
-        case .waiting: return 2
-        case .running: return 1
+        case .error:   return 4
+        case .waiting: return 3
+        case .running: return 2
+        case .done:    return 1
         case .idle:    return 0
         }
     }
@@ -56,6 +73,10 @@ struct Session {
     // PreToolUse. Drives the approval panel's "pending action" line.
     var pendingTool: String?
     var pendingInput: String?
+    // The Notification kind when the hook last fired one (issue #30):
+    // "permission_prompt" (urgent approval) or "idle_prompt" (gentle "you've been
+    // away"). Lets the UI phrase / sound the two differently. nil otherwise.
+    var notifyKind: String?
     // True for Claude Desktop (Cowork / agent-mode) sessions. They can't be
     // focused via a terminal/tty or resolved remotely — jump just brings the
     // desktop app forward (see `jump` in main.swift).
@@ -84,6 +105,7 @@ struct Session {
         self.updatedAt = (json["updated_at"] as? Double) ?? 0
         self.pendingTool = json["pending_tool"] as? String
         self.pendingInput = json["pending_input"] as? String
+        self.notifyKind = json["notify_kind"] as? String
     }
 
     // Test-friendly memberwise initializer.
@@ -91,11 +113,13 @@ struct Session {
          title: String = "", lastEvent: String = "", lastError: String? = nil,
          errorAt: Double? = nil, updatedAt: Double, pid: Int32? = nil,
          pendingTool: String? = nil, pendingInput: String? = nil,
+         notifyKind: String? = nil,
          isDesktop: Bool = false, trustedActive: Bool = false) {
         self.id = id; self.folder = folder; self.cwd = cwd; self.status = status
         self.title = title; self.lastEvent = lastEvent; self.lastError = lastError
         self.errorAt = errorAt; self.updatedAt = updatedAt; self.pid = pid
         self.pendingTool = pendingTool; self.pendingInput = pendingInput
+        self.notifyKind = notifyKind
         self.isDesktop = isDesktop; self.trustedActive = trustedActive
     }
 }
@@ -192,6 +216,19 @@ struct DesktopSession {
     var prState: String?
     var prNumber: Int?
     var updatedAt: Double   // seconds (the file stores lastActivityAt in ms)
+    // When the user last opened this session in Claude Desktop (file stores
+    // lastFocusedAt in ms; 0 = never focused). Compared against the transcript
+    // mtime to tell a finished-but-UNVIEWED session (→ .done, needs review) from
+    // one the user has already looked at (→ idle, nothing to surface).
+    var lastFocusedAt: Double = 0
+    // The tool name the transcript tail ends on with no answer — set by the loader
+    // for sessions blocked on the user (AskUserQuestion / ExitPlanMode). Drives the
+    // approval panel and lets the merge distinguish "blocked" from "finished".
+    var pendingTool: String? = nil
+    // True for scheduled-task (cron bot) sessions — those carry a scheduledTaskId.
+    // Claude Desktop's welcome page excludes them entirely, so we do too (issue
+    // #32); they're headless automation, not something awaiting your attention.
+    var isScheduled: Bool = false
 
     // Parses the persisted metadata. Returns nil for archived sessions or any
     // file missing a cliSessionId. Status defaults to .idle; the loader sets it
@@ -209,17 +246,22 @@ struct DesktopSession {
         self.prNumber = (json["prNumber"] as? Int) ?? (json["prNumber"] as? Double).map { Int($0) }
         let ms = (json["lastActivityAt"] as? Double) ?? ((json["lastActivityAt"] as? Int).map(Double.init) ?? 0)
         self.updatedAt = ms / 1000.0
+        let fms = (json["lastFocusedAt"] as? Double) ?? ((json["lastFocusedAt"] as? Int).map(Double.init) ?? 0)
+        self.lastFocusedAt = fms / 1000.0
+        if let sid = json["scheduledTaskId"] as? String, !sid.isEmpty { self.isScheduled = true }
         self.status = .idle
     }
 
     init(sessionId: String, cwd: String = "", title: String = "", status: Status,
-         prState: String? = nil, prNumber: Int? = nil, updatedAt: Double) {
+         prState: String? = nil, prNumber: Int? = nil, updatedAt: Double,
+         lastFocusedAt: Double = 0, pendingTool: String? = nil, isScheduled: Bool = false) {
         self.sessionId = sessionId; self.cwd = cwd
         self.folder = (cwd as NSString).lastPathComponent
         if self.folder.isEmpty { self.folder = cwd.isEmpty ? sessionId : cwd }
         self.title = title.isEmpty ? self.folder : title
         self.status = status; self.prState = prState; self.prNumber = prNumber
-        self.updatedAt = updatedAt
+        self.updatedAt = updatedAt; self.lastFocusedAt = lastFocusedAt
+        self.pendingTool = pendingTool; self.isScheduled = isScheduled
     }
 
     // Dropdown activity line: marks the row as Desktop-origin and shows PR state.
@@ -238,45 +280,135 @@ struct DesktopSession {
 // quiet IS the session waiting for you. See inferDesktopStatus.
 let userBlockingTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
 
-// Name of the tool the transcript tail ends on with no following user/tool_result
-// — i.e. the session is blocked awaiting approval, a running tool, or (for the
-// user-blocking tools above) the user's answer. nil when the last role-bearing
-// message is a user turn or carries no tool_use. This is the only live signal
-// the transcript adds beyond file freshness.
-func transcriptPendingTool(_ lines: [[String: Any]]) -> String? {
+// What the transcript's last role-bearing message represents — the live signal
+// the transcript adds beyond file freshness. Distinguishing `.finished` (ends on
+// assistant TEXT — the turn is over, a `Stop`) from `.runningTool` (ends on an
+// assistant tool_use with no result yet — a tool is executing) is what stops a
+// just-finished session from being mislabelled "running" purely because its file
+// is fresh. The old `transcriptPendingTool` collapsed `.finished` and `.userTurn`
+// both to nil, so `inferDesktopStatus` couldn't tell them apart (issue #31).
+enum TranscriptTail: Equatable {
+    case finished                 // assistant text, just COMPLETED work — does NOT need you
+    case finishedAsking           // assistant text that ENDS ASKING you a question → needs input
+    case runningTool(String)      // assistant non-blocking tool_use, no result yet → executing
+    case blocking(String)         // assistant user-blocking tool (AskUserQuestion / ExitPlanMode)
+    case userTurn                 // ends on a user message / tool_result → agent about to continue
+    case none                     // no role-bearing message found in the tail
+
+    // The tool name for the blocking/running cases (nil otherwise) — mirrors the
+    // old `transcriptPendingTool` return so the approval panel keeps working.
+    var toolName: String? {
+        switch self {
+        case .blocking(let t), .runningTool(let t): return t
+        default: return nil
+        }
+    }
+}
+
+// Does the agent's final text END BY ASKING the user something? A finished turn
+// is only "needs input" when the agent is actually waiting on your answer — a
+// plain completion ("done, tests pass") is not. Heuristic: the last non-empty
+// line carries a question mark (ASCII "?" or full-width "？"). This separates
+// "要我继续吗？" from "已完成，已合并。" without misclassifying every finished turn.
+func textEndsAsking(_ text: String) -> Bool {
+    let lines = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+    guard let last = lines.last(where: { !$0.isEmpty }) else { return false }
+    return last.contains("?") || last.contains("？")
+}
+
+// Classify the transcript tail by walking back to the last role-bearing message.
+func classifyTail(_ lines: [[String: Any]]) -> TranscriptTail {
     for line in lines.reversed() {
         guard let msg = line["message"] as? [String: Any],
               let role = msg["role"] as? String else { continue }
-        if role == "user" { return nil }   // a user turn (incl. tool_result) answered it
+        if role == "user" { return .userTurn }   // a user turn (incl. tool_result)
         if role == "assistant" {
             let content = msg["content"] as? [[String: Any]] ?? []
-            // Prefer a user-blocking tool name if present, else the first tool_use.
             let toolNames = content.compactMap { item -> String? in
                 (item["type"] as? String) == "tool_use" ? (item["name"] as? String ?? "") : nil
             }
-            if let blocking = toolNames.first(where: { userBlockingTools.contains($0) }) { return blocking }
-            return toolNames.first
+            // A user-blocking tool wins; else an executing tool; else it's text.
+            if let blocking = toolNames.first(where: { userBlockingTools.contains($0) }) {
+                return .blocking(blocking)
+            }
+            if let tool = toolNames.first(where: { !$0.isEmpty }) {
+                return .runningTool(tool)
+            }
+            // Text-only turn: needs input only if it ends asking you something.
+            let text = content.compactMap { item -> String? in
+                (item["type"] as? String) == "text" ? (item["text"] as? String) : nil
+            }.joined(separator: "\n")
+            return textEndsAsking(text) ? .finishedAsking : .finished
         }
     }
-    return nil
+    return .none
 }
 
-// Infer a Desktop session's status from its transcript:
-//   • Ends on a user-blocking tool (AskUserQuestion / ExitPlanMode) → waiting,
-//     REGARDLESS of how long it has been quiet — the agent is blocked on your
-//     answer, and that wait is exactly when the transcript goes silent. Letting
-//     it decay to idle (the old bug) made "needs input" sessions vanish.
-//   • Otherwise freshness alone decides: a recently-written transcript is the
-//     agent working, a quiet one is idle.
-// A pending NON-blocking tool_use (Bash/Edit/…) is a tool EXECUTING, not awaiting
-// you — so it stays "running", not "waiting". (Classifying a mid-execution tool as
-// waiting made an actively-working session flip waiting↔running every poll, which
-// added/removed the approval panel and flickered the popover up and down.)
-// pendingTool is the tool name the transcript ends on (nil if none / answered).
-func inferDesktopStatus(pendingTool: String?, mtime: Double,
+// Backward-compatible accessor: the tool name the tail ends on (nil if finished /
+// a user turn / empty). Kept so existing callers and the approval panel work.
+func transcriptPendingTool(_ lines: [[String: Any]]) -> String? { classifyTail(lines).toolName }
+
+// Outer bound for scanning/keeping Desktop sessions in the welcome-list filter
+// (issue #32) — interactive sessions up to ~24h old.
+let desktopDoneWindow: Double = 24 * 3600
+
+// How recently a turn that ENDED ASKING you still counts as "Needs input". A
+// genuinely unanswered question stays actionable for a while (you clear it by
+// replying), so this tracks the 24h list window. A plain completed turn is NOT
+// "needs input" regardless of age — see inferDesktopStatus / classifyTail.
+let desktopNeedsInputWindow: Double = 24 * 3600
+
+// Mirror the welcome page's selection: drop scheduled-task (bot) sessions, and
+// anything older than the ~24h activity window — except a session blocked on you
+// (`.waiting`), which stays no matter how long it's been quiet (that quiet IS the
+// wait). Pure so it's unit-testable independent of the I/O scan (issue #32).
+func filterWelcomeSessions(_ sessions: [DesktopSession],
+                           now: Double = Date().timeIntervalSince1970) -> [DesktopSession] {
+    sessions.filter { d in
+        if d.isScheduled { return false }
+        if d.status == .waiting { return true }
+        return now - d.updatedAt < desktopDoneWindow
+    }
+}
+
+// Infer a Desktop session's status from its transcript TAIL (not raw freshness)
+// + when the user last opened it:
+//   • `.blocking` (AskUserQuestion / ExitPlanMode) → waiting, REGARDLESS of how
+//     long it's been quiet — the agent is blocked on your answer, and that quiet
+//     IS the wait.
+//   • `.runningTool` / `.userTurn` → a tool is executing or the agent is mid-turn:
+//     running only while fresh; a stale one stalled/crashed → idle.
+//   • `.finished` → the agent ENDED its turn (a `Stop`). It is NOT running just
+//     because the file is fresh (the issue #31 bug). Surface as `.done` ("needs
+//     review") only while recent AND unviewed (last write newer than
+//     lastFocusedAt); opening it in Claude advances lastFocusedAt past the
+//     transcript so it self-clears. Stale / already-viewed → idle (hidden).
+//   • `.none` → no transcript content to act on → idle.
+func inferDesktopStatus(tail: TranscriptTail, mtime: Double, lastFocusedAt: Double = 0,
                         now: Double = Date().timeIntervalSince1970) -> Status {
-    if let t = pendingTool, userBlockingTools.contains(t) { return .waiting }
-    return (now - mtime >= runningLivenessWindow) ? .idle : .running
+    switch tail {
+    case .blocking:
+        return .waiting
+    case .runningTool, .userTurn:
+        return (now - mtime < runningLivenessWindow) ? .running : .idle
+    case .finishedAsking:
+        // Agent finished its turn ENDING ON A QUESTION → your turn to answer.
+        // Counts as "Needs input" only when BOTH (a) the question is recent and
+        // (b) you've actually ENGAGED with the session recently (lastFocusedAt in
+        // window). (b) drops abandoned sessions: a conversation you last opened
+        // days ago that a background loop appended a question to is NOT something
+        // awaiting you — welcome-page parity. You clear it by replying (→ running).
+        let recentQuestion = now - mtime < desktopNeedsInputWindow
+        let recentlyEngaged = lastFocusedAt > 0 && now - lastFocusedAt < desktopNeedsInputWindow
+        return (recentQuestion && recentlyEngaged) ? .done : .idle
+    case .finished:
+        // Plain COMPLETED turn — the agent did the work and did NOT ask you
+        // anything. This does NOT need further input, so it's hidden (idle); the
+        // list stays "running + needs-input + error", not a history of done work.
+        return .idle
+    case .none:
+        return .idle
+    }
 }
 
 // Merge the authoritative native sessions with our hook-derived enrichment.
@@ -299,18 +431,43 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
     // native entry alone would surface a misleading zero-age idle row.
     var desktopPid: [String: Int32] = [:]
     for n in native where n.entrypoint == "claude-desktop" { desktopPid[n.sessionId] = n.pid }
+    // Transcript-grounded Desktop status (running / waiting-blocked / done / idle),
+    // keyed by id, produced by loadDesktop. For a Desktop native entry we trust
+    // THIS over the hook's idle/running: the hook can stay stuck on "running" long
+    // after the agent stopped, and its "idle" can't tell a finished-but-unreviewed
+    // turn from one you've already seen. The hook still overlays error + pending
+    // approval details below.
+    var desktopByID: [String: DesktopSession] = [:]
+    for d in desktop { desktopByID[d.sessionId] = d }
 
     for n in native {
         let h = hooks[n.sessionId]
-        if n.entrypoint == "claude-desktop" && h == nil { continue }
+        let dg = n.entrypoint == "claude-desktop" ? desktopByID[n.sessionId] : nil
+        // A Desktop native entry with neither a transcript-grounded status nor a
+        // hook carries no usable state (no busy/waiting field) — skip it here and
+        // let the fresh-desktop fallback below own a brand-new conversation.
+        if n.entrypoint == "claude-desktop" && dg == nil && h == nil { continue }
         if h != nil { usedHookIds.insert(n.sessionId) }
 
         var status = mapNativeStatus(n.nativeStatus)
-        // Desktop native entries carry no busy/waiting field, so mapNativeStatus
-        // always returns .idle for them — when a hook is present it's the ONLY
-        // live status signal, so let it drive (running / waiting / error alike).
-        if n.entrypoint == "claude-desktop", let h = h {
-            status = h.status
+        // Desktop native entries carry no busy/waiting field. The transcript scan
+        // is the base, but a FRESH hook saying "running" means the agent is
+        // actively working (Stop hasn't fired) even when the transcript tail
+        // momentarily ended on text — without this an actively-running session
+        // that's between tool calls reads as `.done` and the running count
+        // under-reports (it should match the agents Claude shows as running).
+        // A STALE running hook is ignored (the missed-Stop case from issue #31).
+        if n.entrypoint == "claude-desktop" {
+            let hookRunningFresh = h?.status == .running && now - (h?.updatedAt ?? 0) < runningLivenessWindow
+            if let dg = dg {
+                if dg.status == .waiting { status = .waiting }      // blocked on user wins
+                else if hookRunningFresh { status = .running }      // fresh hook = actively working
+                else { status = dg.status }                         // done / idle / running from transcript
+            } else if let h = h, now - h.updatedAt < runningLivenessWindow {
+                status = h.status                                   // no transcript yet: trust a fresh hook
+            } else {
+                status = .idle
+            }
         }
         // Hook `waiting` overrides native `busy` for CLI sessions too: the hook
         // fires PreToolUse for AskUserQuestion / ExitPlanMode / Notification
@@ -331,13 +488,17 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
             if now - errTime < runningLivenessWindow { status = .error }
         }
 
-        let updated = max(n.updatedAt, h?.updatedAt ?? 0)
+        // Desktop recency lives in the transcript mtime (dg.updatedAt); the native
+        // entry has none and the hook's can lag, so fold it into the sort key.
+        let updated = max(n.updatedAt, h?.updatedAt ?? 0, dg?.updatedAt ?? 0)
         let title: String = {
             if let t = h?.title, !t.isEmpty, t != n.folder { return t }
+            if let t = dg?.title, !t.isEmpty { return t }
             return n.folder
         }()
         let lastEvent: String = {
             if let h = h, h.updatedAt >= n.updatedAt, !h.lastEvent.isEmpty { return h.lastEvent }
+            if let dg = dg { return dg.activityText }
             return n.activityText
         }()
         // Trust the resolved status without an age check when the source is
@@ -347,15 +508,21 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
         // 90s into a long "thinking" turn even though the session really is busy.
         let trusted: Bool = {
             if n.nativeStatus == "busy" || n.nativeStatus == "waiting" { return true }
-            if n.entrypoint == "claude-desktop", let h = h,
-               h.status == .running || h.status == .waiting { return true }
+            // Desktop status is loader-gated (waiting never decays; done already
+            // passed its recency+unviewed gate; running means a fresh transcript) —
+            // so disable the 90s aggregate decay for all three.
+            if n.entrypoint == "claude-desktop" {
+                return status == .running || status == .waiting || status == .done
+            }
             return false
         }()
 
         out.append(Session(id: n.sessionId, folder: n.folder, cwd: n.cwd, status: status,
                            title: title, lastEvent: lastEvent, lastError: h?.lastError,
                            errorAt: h?.errorAt, updatedAt: updated, pid: n.pid,
-                           pendingTool: h?.pendingTool, pendingInput: h?.pendingInput,
+                           pendingTool: h?.pendingTool ?? dg?.pendingTool,
+                           pendingInput: h?.pendingInput,
+                           notifyKind: h?.notifyKind,
                            isDesktop: n.entrypoint == "claude-desktop",
                            trustedActive: trusted))
     }
@@ -391,36 +558,45 @@ func mergeSessions(native: [NativeSession], hooks: [String: Session],
     }
 
     for d in desktop where !seen.contains(d.sessionId) {
-        // .waiting = blocked on the user (a question / plan approval) — keep it
-        // visible no matter how long it's been quiet; that's the whole point of a
-        // "needs input" flag. .running only counts while the transcript is fresh.
-        let include = d.status == .waiting || (now - d.updatedAt < 120 && d.status == .running)
+        // .waiting = blocked on the user (a question / plan approval); .done =
+        // finished, awaiting your review — both stay visible no matter how long
+        // they've been quiet (the loader already gated their recency). .running
+        // only counts while the transcript is fresh.
+        let include = d.status == .waiting || d.status == .done
+            || (now - d.updatedAt < 120 && d.status == .running)
         if include {
-            // Transcript-inferred waiting is "blocked on user" — never decay.
-            // Running is gated on freshness above; let aggregate apply its own
-            // staleness check so a session that quietly stalls (transcript stops
-            // appending) drops out of the glyph after 90s.
-            let trusted = d.status == .waiting
+            // waiting/done are loader-gated, so don't let the 90s aggregate decay
+            // drop them. Running is gated on freshness above; leave it un-trusted
+            // so a session that quietly stalls drops out of the glyph after 90s.
+            let trusted = d.status == .waiting || d.status == .done
             out.append(Session(id: d.sessionId, folder: d.folder, cwd: d.cwd,
                                status: d.status, title: d.title,
                                lastEvent: d.activityText, updatedAt: d.updatedAt,
-                               pid: desktopPid[d.sessionId], isDesktop: true,
-                               trustedActive: trusted))
+                               pid: desktopPid[d.sessionId],
+                               pendingTool: d.pendingTool,
+                               isDesktop: true, trustedActive: trusted))
             seen.insert(d.sessionId)
         }
     }
 
-    // Sessions needing the user's attention come first (error > waiting >
-    // running > idle, via Status.priority), then most-recent-first within a
-    // rank. A waiting Desktop session's updatedAt = transcript mtime, which
-    // stops advancing while it waits, so a pure updatedAt sort would sink the
-    // very session the user needs to act on below already-finished ones.
-    out.sort {
+    // The list is exactly two categories: actively RUNNING + NEEDS-HANDLING
+    // (waiting / done / error). Anything that decays to idle — an idle terminal, a
+    // finished-and-seen Desktop chat, a stale-running session past its liveness
+    // window — is dropped so the list mirrors the *current* Claude state rather
+    // than accumulating history.
+    var visible = out.filter { effectiveStatus($0, now: now) != .idle }
+
+    // Sessions needing the user's attention come first (error > waiting > running
+    // > done, via Status.priority), then most-recent-first within a rank. A
+    // waiting/done Desktop session's updatedAt = transcript mtime, which stops
+    // advancing while it waits, so a pure updatedAt sort would sink the very
+    // session the user needs to act on below already-finished ones.
+    visible.sort {
         $0.status.priority != $1.status.priority
             ? $0.status.priority > $1.status.priority
             : $0.updatedAt > $1.updatedAt
     }
-    return out
+    return visible
 }
 
 func relativeAge(_ epoch: Double, now: Double = Date().timeIntervalSince1970) -> String {
@@ -489,6 +665,20 @@ func statusCount(_ sessions: [Session], _ status: Status,
     sessions.reduce(0) { $0 + (effectiveStatus($1, now: now) == status ? 1 : 0) }
 }
 
+// The number shown next to the menu-bar owl glyph: the count of sessions in the
+// SAME state the glyph's colour is showing (i.e. matching aggregateStatus), so
+// the digit and the colour always agree. Priority error > needs-input > running
+// > idle(no number). "Needs input" is waiting + done — both render the same
+// yellow, so the yellow glyph's number covers both.
+func badgeCount(_ sessions: [Session], now: Double = Date().timeIntervalSince1970) -> Int {
+    switch aggregateStatus(sessions, now: now) {
+    case .error:          return statusCount(sessions, .error, now: now)
+    case .waiting, .done: return statusCount(sessions, .waiting, now: now) + statusCount(sessions, .done, now: now)
+    case .running:        return statusCount(sessions, .running, now: now)
+    case .idle:           return 0
+    }
+}
+
 // MARK: - Dynamic Island folded label
 //
 // Pure rendering helper for the island's folded state. Picks the single
@@ -537,6 +727,9 @@ func islandFocusSession(_ sessions: [Session], aggregate: Status,
         return sessions
             .filter { $0.status == .running && ($0.trustedActive || now - $0.updatedAt < runningLivenessWindow) }
             .max(by: { $0.updatedAt < $1.updatedAt })
+    case .done:
+        return sessions.filter { $0.status == .done }
+            .max(by: { $0.updatedAt < $1.updatedAt })
     }
 }
 
@@ -549,6 +742,10 @@ func islandFoldedLabel(sessions: [Session],
     switch agg {
     case .idle:
         return IslandLabel(main: "Claude Dot", sub: "", kind: .idle)
+    case .done:
+        // Agent finished its turn — your turn to reply ("Needs input", calm).
+        return IslandLabel(main: "Needs input · " + islandTruncate(focus.folder, 12),
+                           sub: islandTruncate(focus.folder, 28), kind: .waiting)
     case .error:
         let tool = focus.pendingTool ?? focus.lastEvent.components(separatedBy: " ").last ?? "—"
         let main = "Error · " + islandTruncate(tool, 12)

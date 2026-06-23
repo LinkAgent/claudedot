@@ -27,6 +27,7 @@ func statusColor(_ s: Status, appearance: NSAppearance? = nil) -> NSColor {
     switch s {
     case .running: return NSColor(hex: "00A82D") // Evernote-style green
     case .waiting: return NSColor(hex: "FEA700") // Giallo Orion yellow
+    case .done:    return NSColor(hex: "FEA700") // "Needs input" — same as waiting (welcome parity)
     case .error:   return NSColor(hex: "D40000") // Rosso Mars red
     case .idle:
         let app = appearance ?? NSApp.effectiveAppearance
@@ -115,6 +116,8 @@ func bundledStatusIconName(for status: Status, appearance: NSAppearance? = nil) 
     switch status {
     case .running: return "StatusRunning"
     case .waiting: return "StatusWaiting"
+    // .done ("Needs input") lights the glyph the same yellow as waiting.
+    case .done: return "StatusWaiting"
     case .error: return "StatusError"
     case .idle:
         let app = appearance ?? NSApp.effectiveAppearance
@@ -400,10 +403,12 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
     // Decay stale-running sessions (effectiveStatus) so this split matches the
     // owl glyph, the menu-bar badge, and the "N active" label below.
     let runCount = statusCount(sessions.map { $0.s }, .running)
-    let waitCount = statusCount(sessions.map { $0.s }, .waiting)
+    // "Needs input" = pending approvals/questions (waiting) + finished-your-turn
+    // (done), matching Claude Desktop's welcome page which lumps them together.
+    let needsInput = statusCount(sessions.map { $0.s }, .waiting) + statusCount(sessions.map { $0.s }, .done)
     let rightStack = NSStackView(views: [
-        capLabel("RUNNING · WAITING", theme, .right),
-        label("\(runCount) · \(waitCount)", mono(12, .medium), theme.ink, .right),
+        capLabel("RUNNING · NEEDS INPUT", theme, .right),
+        label("\(runCount) · \(needsInput)", mono(12, .medium), theme.ink, .right),
     ])
     rightStack.orientation = .vertical; rightStack.alignment = .trailing; rightStack.spacing = 3
     rightStack.translatesAutoresizingMaskIntoConstraints = false
@@ -651,8 +656,13 @@ func codePill(_ text: String, _ theme: Theme) -> NSAttributedString {
 func statusLine(for s: Session) -> (String, Bool) {
     switch s.status {
     case .waiting:
-        let tool = s.pendingTool.map { " · \($0)" } ?? ""
-        return ("Awaiting approval\(tool)", true)
+        // A pending tool = a real approval/question the agent is blocked on.
+        // No pending tool = a session sitting at a prompt waiting for your input.
+        if let tool = s.pendingTool { return ("Awaiting approval · \(tool)", true) }
+        return ("Needs your input", true)
+    case .done:
+        // Finished Desktop turn — your turn to reply. "Needs input" (welcome parity).
+        return ("Needs input · \(relativeAge(s.updatedAt))", true)
     case .running:
         let ev = s.lastEvent.isEmpty ? "Working…" : s.lastEvent
         return (ev, false)
@@ -678,7 +688,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // its transcript mtime ages well past the 90s "running" window. Read the tail
     // within this wider window so those still surface as "waiting"; beyond it,
     // skip the read entirely. Bounded because non-archived recent sessions are few.
-    let desktopReadWindow: Double = 6 * 3600
+    // Aligned to the welcome-page window (issue #32) so dead sessions within ~24h
+    // are still read and surfaced.
+    let desktopReadWindow: Double = desktopDoneWindow
     // /status scraper (subscription limits) — script, output cache, scratch dir.
     let probeScript = NSString(string: "~/.claude/statusbar/cc_usage_probe.py").expandingTildeInPath
     let usagePath = NSString(string: "~/.claude/statusbar/usage.json").expandingTildeInPath
@@ -828,6 +840,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     guard let data = fm.contents(atPath: path),
                           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           var d = DesktopSession(json: obj) else { continue }
+                    // Scheduled-task (cron bot) sessions are excluded entirely —
+                    // the welcome page hides them, and skipping early avoids the
+                    // transcript read (issue #32).
+                    if d.isScheduled { continue }
                     let isLive = liveDesktopIds.contains(d.sessionId)
                     // Activity is judged by the TRANSCRIPT mtime, not the file's
                     // lastActivityAt — the latter lags by minutes (it tracks UI
@@ -841,14 +857,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     // and that quiet IS the wait. Dead sessions still respect the
                     // 6h window so the scanner stays cheap on long histories.
                     if !isLive && now - mtime >= desktopReadWindow { continue }
-                    let tail = transcriptTail(d.sessionId)
+                    let tail = transcriptTail(d.sessionId).tail
                     d.updatedAt = mtime
-                    d.status = inferDesktopStatus(pendingTool: tail.pendingTool, mtime: mtime, now: now)
+                    d.pendingTool = tail.toolName
+                    d.status = inferDesktopStatus(tail: tail, mtime: mtime,
+                                                  lastFocusedAt: d.lastFocusedAt, now: now)
                     if d.status != .idle { result.append(d) } // idle = nothing to surface
                 }
             }
         }
-        return result
+        // Final welcome-page parity: drop scheduled + beyond-24h (issue #32).
+        return filterWelcomeSessions(result, now: now)
     }
 
     func loadSessions() -> [Session] {
@@ -860,24 +879,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     // Read the tail of a session's transcript (last ~64KB only, so huge files
-    // stay cheap): returns the tool name it ends on with no answer (nil if none)
-    // and the file's mtime — the two inputs to inferDesktopStatus.
+    // stay cheap): returns the tail classification (issue #31 — distinguishes a
+    // finished turn from a running tool) and the file's mtime.
     // 64KB was 16KB; a single tool_result with a long stdout dump can be ~30KB
     // and would shove the role markers we look for out of a 16KB window, so a
     // session that's actually mid-Bash would parse as "no pending" and decay
     // to idle. 64KB comfortably covers a few full turns.
-    func transcriptTail(_ id: String) -> (pendingTool: String?, mtime: Double) {
-        guard let path = findTranscript(id) else { return (nil, 0) }
+    func transcriptTail(_ id: String) -> (tail: TranscriptTail, mtime: Double) {
+        guard let path = findTranscript(id) else { return (.none, 0) }
         let fm = FileManager.default
         let mtime = ((try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date)?
             .timeIntervalSince1970 ?? 0
-        guard let handle = FileHandle(forReadingAtPath: path) else { return (nil, mtime) }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return (.none, mtime) }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
         let window: UInt64 = 64 * 1024
         let start = size > window ? size - window : 0
         try? handle.seek(toOffset: start)
-        guard let data = try? handle.readToEnd(), !data.isEmpty else { return (nil, mtime) }
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return (.none, mtime) }
         // If we seeked into the middle, drop the leading partial line.
         var slice = data
         if start > 0, let firstNL = data.firstIndex(of: 0x0A) {
@@ -887,7 +906,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         for raw in slice.split(separator: 0x0A) {
             if let obj = try? JSONSerialization.jsonObject(with: Data(raw)) as? [String: Any] { lines.append(obj) }
         }
-        return (transcriptPendingTool(lines), mtime)
+        return (classifyTail(lines), mtime)
     }
 
     // Locate a session's transcript .jsonl under ~/.claude/projects/*/.
@@ -1024,13 +1043,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         maybeProbe()
         let sessions = loadSessions()
         let agg = aggregateStatus(sessions)
-        // Same decayed-status rule as the popover and island (see effectiveStatus)
-        // so the badge can't disagree with the owl glyph or the popover counts.
-        let attention = sessions.filter { let e = effectiveStatus($0); return e == .error || e == .waiting }.count
-        let running = statusCount(sessions, .running)
+        // The badge number matches the glyph's state: error count when red,
+        // needs-input count when yellow, running count when green, none when idle
+        // (see badgeCount) — so digit and colour always agree.
+        let badge = badgeCount(sessions)
         statusItem.button?.image = statusIcon(for: agg, diameter: menuBarIconSize,
                                               appearance: statusItem.button?.effectiveAppearance)
-        statusItem.button?.title = attention > 0 ? " \(attention)" : (running > 0 ? " \(running)" : "")
+        statusItem.button?.title = badge > 0 ? " \(badge)" : ""
 
         // Push every tick to the Dynamic Island so its status dot/count stays
         // live without depending on the popover being open. Tokens aren't shown
@@ -1293,8 +1312,8 @@ func demoData() -> ([SessionVM], UsageStats) {
                 lastEvent: "Desktop", updatedAt: now - 8, isDesktop: true),
         Session(id: "e", folder: "release-tools", cwd: "/Users/demo/work/release", status: .error,
                 lastEvent: "error in Bash", lastError: "psql: connection refused", updatedAt: now - 60, pid: 5),
-        Session(id: "d", folder: "benchmark-lab", cwd: "/Users/demo/work/bench", status: .idle,
-                lastEvent: "Completed", updatedAt: now - 130, pid: 4),
+        Session(id: "d", folder: "benchmark-lab", cwd: "/Users/demo/work/bench", status: .done,
+                lastEvent: "Desktop", updatedAt: now - 130, pid: 4, isDesktop: true),
     ]
     let toks = ["a": 8_200_000, "b": 21_700_000, "c": 15_900_000, "e": 3_100_000, "d": 22_400_000, "f": 6_500_000]
     let vms = sessions.map { SessionVM(s: $0, tokens: toks[$0.id] ?? 0) }

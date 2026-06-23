@@ -268,7 +268,14 @@
     height:var(--island-h);
     display:flex;align-items:stretch;
     font-family:-apple-system,"SF Pro Text",sans-serif;
-    box-shadow:0 6px 24px rgba(0,0,0,.55), 0 0 0 .5px rgba(0,0,0,.4);
+    /* 一圈浅色发丝边 —— 让胶囊轮廓在贴住物理 notch 时也读得出"药丸"形状。
+       外圈一根 1px 浅色描边定形，再叠一根 .5px 内圈白光提亮上沿，
+       最后保留落影把它从菜单栏里抬起。透明度刻意压低，远看是"亮一点的边"，
+       近看不会变成奶白勾边喧宾夺主。 */
+    box-shadow:
+      0 0 0 1px rgba(236,232,221,.22),
+      inset 0 0 0 .5px rgba(255,255,255,.06),
+      0 6px 24px rgba(0,0,0,.55);
     transition:width .28s cubic-bezier(.2,.8,.2,1),
                height .28s cubic-bezier(.2,.8,.2,1),
                border-radius .28s;

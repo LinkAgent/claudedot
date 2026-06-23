@@ -192,6 +192,11 @@ struct DesktopSession {
     var prState: String?
     var prNumber: Int?
     var updatedAt: Double   // seconds (the file stores lastActivityAt in ms)
+    // True when this session was spawned by a scheduled task (a cron / bot run,
+    // e.g. "Github issue bugfix bot"). The Claude Desktop welcome page excludes
+    // these entirely, and so do we — they're noise, not work the user is doing.
+    // See filterWelcomeSessions.
+    var isScheduled: Bool
 
     // Parses the persisted metadata. Returns nil for archived sessions or any
     // file missing a cliSessionId. Status defaults to .idle; the loader sets it
@@ -209,17 +214,21 @@ struct DesktopSession {
         self.prNumber = (json["prNumber"] as? Int) ?? (json["prNumber"] as? Double).map { Int($0) }
         let ms = (json["lastActivityAt"] as? Double) ?? ((json["lastActivityAt"] as? Int).map(Double.init) ?? 0)
         self.updatedAt = ms / 1000.0
+        // A non-empty scheduledTaskId marks a cron/bot-driven session.
+        if let sid = json["scheduledTaskId"] as? String { self.isScheduled = !sid.isEmpty }
+        else { self.isScheduled = false }
         self.status = .idle
     }
 
     init(sessionId: String, cwd: String = "", title: String = "", status: Status,
-         prState: String? = nil, prNumber: Int? = nil, updatedAt: Double) {
+         prState: String? = nil, prNumber: Int? = nil, updatedAt: Double,
+         isScheduled: Bool = false) {
         self.sessionId = sessionId; self.cwd = cwd
         self.folder = (cwd as NSString).lastPathComponent
         if self.folder.isEmpty { self.folder = cwd.isEmpty ? sessionId : cwd }
         self.title = title.isEmpty ? self.folder : title
         self.status = status; self.prState = prState; self.prNumber = prNumber
-        self.updatedAt = updatedAt
+        self.updatedAt = updatedAt; self.isScheduled = isScheduled
     }
 
     // Dropdown activity line: marks the row as Desktop-origin and shows PR state.
@@ -230,6 +239,22 @@ struct DesktopSession {
         }
         return parts.joined(separator: " · ")
     }
+}
+
+// How long a Desktop session stays eligible for the list after its last
+// activity, matching the Claude Desktop welcome page's ~24h window. (The old
+// 6h read window dropped sessions the welcome page still showed.)
+let desktopDoneWindow: Double = 24 * 3600
+
+// The welcome-page inclusion rule, as a pure function so it's unit-testable
+// without filesystem I/O (loadDesktop in main.swift stays a thin I/O shell over
+// it). A Desktop session belongs in the list when it is:
+//   • not a scheduled-task (cron/bot) session — those are excluded outright, and
+//   • active within the last `desktopDoneWindow` (~24h) by lastActivityAt.
+// Archived sessions are already dropped at parse time (DesktopSession.init?).
+func filterWelcomeSessions(_ sessions: [DesktopSession],
+                           now: Double = Date().timeIntervalSince1970) -> [DesktopSession] {
+    sessions.filter { !$0.isScheduled && now - $0.updatedAt < desktopDoneWindow }
 }
 
 // Tools whose pending tool_use means the session is BLOCKED ON THE USER (the

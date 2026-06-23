@@ -490,7 +490,12 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
         list.addArrangedSubview(pad(empty, 6, 10, 10, 10))
     }
 
-    for vm in sessions {
+    // Cap the visible rows so a long backlog can't push the footer off-screen;
+    // sessions are pre-sorted (attention first, then most recent) so the head is
+    // the relevant slice. The hidden tail is surfaced via a "+N more" hint.
+    let rowCap = 10
+    let visibleSessions = Array(sessions.prefix(rowCap))
+    for vm in visibleSessions {
         let s = vm.s
         let row = HoverRow(theme: theme)
         row.onClick = { handlers.jump(s.pid, s.cwd, s.isDesktop) }
@@ -571,6 +576,10 @@ func buildPopover(sessions: [SessionVM], stats statsIn: UsageStats, theme: Theme
             list.addArrangedSubview(box)
             box.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true
         }
+    }
+    if sessions.count > visibleSessions.count {
+        let more = label("+\(sessions.count - visibleSessions.count) more", ui(11), theme.ink3)
+        list.addArrangedSubview(pad(more, 6, 12, 8, 12))
     }
     add(pad(list, 0, 8, 6, 8))
 
@@ -665,11 +674,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // Claude Desktop's own session registry (Cowork / agent mode). Private to the
     // desktop app and version-fragile — schema may change across Claude releases.
     let desktopDir = NSString(string: "~/Library/Application Support/Claude/claude-code-sessions").expandingTildeInPath
-    // A desktop session blocked on you (a question / plan approval) goes quiet, so
-    // its transcript mtime ages well past the 90s "running" window. Read the tail
-    // within this wider window so those still surface as "waiting"; beyond it,
-    // skip the read entirely. Bounded because non-archived recent sessions are few.
-    let desktopReadWindow: Double = 6 * 3600
+    // The activity window for Desktop sessions (excludes scheduled-task bots,
+    // keeps ~24h of activity) lives in Model.swift as `desktopDoneWindow`, shared
+    // with the testable `filterWelcomeSessions` rule loadDesktop applies below.
     // /status scraper (subscription limits) — script, output cache, scratch dir.
     let probeScript = NSString(string: "~/.claude/statusbar/cc_usage_probe.py").expandingTildeInPath
     let usagePath = NSString(string: "~/.claude/statusbar/usage.json").expandingTildeInPath
@@ -806,7 +813,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func loadDesktop(liveDesktopIds: Set<String> = []) -> [DesktopSession] {
         let fm = FileManager.default
         let now = Date().timeIntervalSince1970
-        var result: [DesktopSession] = []
+        // Phase 1: parse every non-archived desktop session file.
+        var parsed: [DesktopSession] = []
         guard let accounts = try? fm.contentsOfDirectory(atPath: desktopDir) else { return [] }
         for acct in accounts {
             let acctPath = (desktopDir as NSString).appendingPathComponent(acct)
@@ -818,26 +826,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     let path = (wsPath as NSString).appendingPathComponent(file)
                     guard let data = fm.contents(atPath: path),
                           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          var d = DesktopSession(json: obj) else { continue }
-                    let isLive = liveDesktopIds.contains(d.sessionId)
-                    // Activity is judged by the TRANSCRIPT mtime, not the file's
-                    // lastActivityAt — the latter lags by minutes (it tracks UI
-                    // focus, not work), which would drop live sessions and show a
-                    // stale age. Stat is cheap; only read the tail within the window.
-                    guard let tpath = findTranscript(d.sessionId) else { continue }
-                    let mtime = ((try? fm.attributesOfItem(atPath: tpath))?[.modificationDate] as? Date)?
-                        .timeIntervalSince1970 ?? 0
-                    // Live (pid alive) sessions: always read the tail — they can
-                    // sit on AskUserQuestion / ExitPlanMode for an unbounded time
-                    // and that quiet IS the wait. Dead sessions still respect the
-                    // 6h window so the scanner stays cheap on long histories.
-                    if !isLive && now - mtime >= desktopReadWindow { continue }
-                    let tail = transcriptTail(d.sessionId)
-                    d.updatedAt = mtime
-                    d.status = inferDesktopStatus(pendingTool: tail.pendingTool, mtime: mtime, now: now)
-                    if d.status != .idle { result.append(d) } // idle = nothing to surface
+                          let d = DesktopSession(json: obj) else { continue }
+                    parsed.append(d)
                 }
             }
+        }
+        // Phase 2: apply the welcome-page inclusion rule — drops scheduled-task
+        // bot sessions outright and anything quiet beyond ~24h. Live (pid alive)
+        // sessions bypass the age gate (they can sit on a blocking question for
+        // hours, and that quiet IS the wait), but a live *scheduled* bot is still
+        // excluded.
+        var candidates = filterWelcomeSessions(parsed, now: now)
+        let candidateIds = Set(candidates.map { $0.sessionId })
+        for d in parsed where liveDesktopIds.contains(d.sessionId)
+            && !d.isScheduled && !candidateIds.contains(d.sessionId) {
+            candidates.append(d)
+        }
+        // Phase 3: judge each candidate's status from its transcript tail.
+        var result: [DesktopSession] = []
+        for d0 in candidates {
+            var d = d0
+            let isLive = liveDesktopIds.contains(d.sessionId)
+            // Activity is judged by the TRANSCRIPT mtime, not the file's
+            // lastActivityAt — the latter lags by minutes (it tracks UI focus,
+            // not work). Stat is cheap; only read the tail within the window.
+            guard let tpath = findTranscript(d.sessionId) else { continue }
+            let mtime = ((try? fm.attributesOfItem(atPath: tpath))?[.modificationDate] as? Date)?
+                .timeIntervalSince1970 ?? 0
+            // Dead sessions still respect the ~24h window on the transcript mtime
+            // so the scanner stays cheap on long histories; live ones always read.
+            if !isLive && now - mtime >= desktopDoneWindow { continue }
+            let tail = transcriptTail(d.sessionId)
+            d.updatedAt = mtime
+            d.status = inferDesktopStatus(pendingTool: tail.pendingTool, mtime: mtime, now: now)
+            if d.status != .idle { result.append(d) } // idle = nothing to surface
         }
         return result
     }

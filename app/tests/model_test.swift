@@ -255,6 +255,41 @@ check("desktop pr parsed", d0?.prNumber == 42)
 check("desktop activity shows PR", (d0?.activityText ?? "").contains("PR #42"))
 check("desktop rejects archived", DesktopSession(json: ["cliSessionId": "x", "isArchived": true]) == nil)
 check("desktop rejects no cliSessionId", DesktopSession(json: ["cwd": "/a"]) == nil)
+check("desktop interactive not scheduled", d0?.isScheduled == false)
+
+// --- welcome-page filtering: scheduled-task exclusion + ~24h window ---
+// A) parse scheduledTaskId into a filterable flag.
+let dSched = DesktopSession(json: ["cliSessionId": "s1", "cwd": "/a",
+                                   "scheduledTaskId": "github-issue-bugfix-bot",
+                                   "lastActivityAt": (now - 60) * 1000.0])
+check("parses scheduledTaskId", dSched?.isScheduled == true)
+check("empty scheduledTaskId is not scheduled",
+      DesktopSession(json: ["cliSessionId": "s1e", "cwd": "/a", "scheduledTaskId": "",
+                            "lastActivityAt": (now - 60) * 1000.0])?.isScheduled == false)
+let dInter = DesktopSession(json: ["cliSessionId": "s2", "cwd": "/a",
+                                   "lastActivityAt": (now - 60) * 1000.0])
+check("interactive not scheduled", dInter?.isScheduled == false)
+
+// B) the pure filter drops scheduled bots, keeps interactive sessions.
+let kept = filterWelcomeSessions([dSched!, dInter!], now: now)
+check("scheduled excluded", !kept.contains { $0.sessionId == "s1" })
+check("interactive kept", kept.contains { $0.sessionId == "s2" })
+
+// C) ~24h window boundary (on lastActivityAt).
+let dOld = DesktopSession(json: ["cliSessionId": "s3", "cwd": "/a",
+                                 "lastActivityAt": (now - 25 * 3600) * 1000.0])
+let dRecent = DesktopSession(json: ["cliSessionId": "s4", "cwd": "/a",
+                                    "lastActivityAt": (now - 23 * 3600) * 1000.0])
+check("beyond 24h dropped", !filterWelcomeSessions([dOld!], now: now).contains { $0.sessionId == "s3" })
+check("within 24h kept", filterWelcomeSessions([dRecent!], now: now).contains { $0.sessionId == "s4" })
+
+// D) the window constant aligns with the welcome page (~24h).
+check("desktop window is ~24h", desktopDoneWindow == 24 * 3600)
+
+// E) memberwise initializer carries the scheduled flag (so loadDesktop and the
+// merge path can both reason about it).
+check("memberwise isScheduled defaults false",
+      DesktopSession(sessionId: "m", status: .running, updatedAt: now).isScheduled == false)
 
 // --- transcript tail / status inference ---
 let toolUseLines: [[String: Any]] = [

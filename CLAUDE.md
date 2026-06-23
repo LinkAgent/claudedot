@@ -56,11 +56,26 @@ The popover is an `NSPopover` rebuilt by `buildPopover(sessions:stats:theme:hand
 
 ## Status priority & colors
 
-Aggregate icon picks the max: `error (3) > waiting (2) > running (1) > idle (0)`. Native `busy` → running, `waiting` → needs-input, else idle. A "running" session older than 90s decays to idle in the aggregate.
+The list mirrors what Claude itself shows: from the **last 24h**, the sessions that are *running*, *need your input*, or *errored*. `mergeSessions` drops anything whose decayed (`effectiveStatus`) status is idle, so finished work that doesn't await you, stale-running sessions, and history all disappear.
 
-The **menu-bar glyph** is a vector owl (`owlImage(for:diameter:)`), `NSBezierPath` → `NSImage`, color = aggregate state via `statusColor(_:)` (running green / waiting yellow / error red / idle gray). `Status.emoji` in `Model.swift` is a fallback for headless contexts only.
+The five `Status` cases:
+- **running** — agent actively working. Native `busy`; a Desktop session whose transcript tail ends on an *executing tool* / a user turn (and is fresh); or a Desktop session with a **fresh hook** reporting running (Stop hasn't fired) — the latter catches an agent that momentarily wrote text mid-turn. See `classifyTail` / `TranscriptTail` and `inferDesktopStatus`.
+- **waiting** — agent is **blocked on you** for an explicit choice/approval: native `waiting`, a hook `waiting` (AskUserQuestion / ExitPlanMode / `permission_prompt` Notification), or a transcript tail ending on a user-blocking tool. Urgent — outranks running, shows the approval panel.
+- **done** — "**Needs input**": the agent finished its turn **ending on a question** (the transcript's last line carries `?`/`？` → `TranscriptTail.finishedAsking`), and only for a session you've **engaged with recently** (`lastFocusedAt` within `desktopNeedsInputWindow`, 24h) — so a conversation a background loop appended a question to, that you abandoned days ago, is *not* surfaced. Lights the owl the **same yellow** as `waiting` and counts toward the badge, but sorts **below** running and shows no panel. A plain *completed* turn (no question) is hidden.
+- **error** — a tool failed (hook overlay, recent only).
+- **idle** — nothing to show; **hidden** from the list.
+
+What "needs input" is, precisely: an **explicit choice/approval** (AskUserQuestion / ExitPlanMode / permission) → `waiting`, **or** a turn whose **last line is a question** → `done` — never a turn that merely completed work.
+
+Aggregate icon picks the max: `error (4) > waiting (3) > running (2) > done (1) > idle (0)`. A "running" session older than 90s decays to idle in the aggregate (unless `trustedActive`). The **menu-bar badge number** (`badgeCount`) matches the glyph's state — error count when red, needs-input count (`waiting + done`) when yellow, running count when green — so digit and colour always agree.
+
+**Desktop status is transcript-grounded, not hook-trusted.** A Desktop native entry can have a hook stuck at "running" long after the agent stopped. So `mergeSessions` drives Desktop status from the `loadDesktop` transcript scan (mtime + tail + `lastFocusedAt`); the hook only **upgrades** a finished tail to running when it's *fresh* (within 90s), and overlays error + pending-approval details. `loadDesktop` excludes **scheduled-task** (cron bot) sessions and bounds the set via the pure `filterWelcomeSessions` (drop `isScheduled`, keep `waiting` regardless of age, else within 24h).
+
+The **menu-bar glyph** is a vector owl (`owlImage(for:diameter:)`), `NSBezierPath` → `NSImage`, color = aggregate state via `statusColor(_:)` (running green / waiting + done yellow / error red / idle gray). `Status.emoji` in `Model.swift` is a fallback for headless contexts only.
 
 The **popover status dots** (`DotView`) share `statusColor(_:)` with the owl glyph so the popover dot and the menu-bar icon read as the same state at a glance. Running and waiting dots get a faint static base ring plus an animated pulse ring (`viewDidMoveToWindow`).
+
+**Notification = the precise "needs you" signal**, subdivided by matcher (`install_hooks.py` registers `permission_prompt` and `idle_prompt`, passing `--notify-kind`; the payload itself has no type field — claude-code#11964). The hook records `notify_kind`: `permission_prompt` → urgent `waiting`; `idle_prompt` → calm (does not escalate).
 
 ### Previewing the UI (no Screen Recording permission)
 

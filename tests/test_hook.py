@@ -270,6 +270,73 @@ def test_compute_update_edges():
     check("unknown event preserves status", st["status"] == "running")
 
 
+def test_notification_kind():
+    """Notification carries a matcher kind through --notify-kind so permission
+    requests (urgent) and idle nudges (calm) map to different states."""
+    print("Notification matcher kind:")
+    # permission_prompt -> urgent Needs You (waiting) + records the kind
+    st = h.compute_update(ev("Notification", message="Claude needs your permission to use Bash",
+                             _notify_kind="permission_prompt"), {})
+    check("permission -> waiting", st["status"] == "waiting")
+    check("permission -> kind recorded", st["notify_kind"] == "permission_prompt")
+
+    # idle_prompt -> calm reminder, does not seize the urgent (waiting) state
+    st = h.compute_update(ev("Notification", message="Claude is waiting for your input",
+                             _notify_kind="idle_prompt"), {})
+    check("idle -> not waiting (calm)", st["status"] != "waiting")
+    check("idle -> kind recorded", st["notify_kind"] == "idle_prompt")
+
+    # No kind (legacy `*` registration) stays safe: default waiting, kind None
+    st = h.compute_update(ev("Notification", message="needs attention"), {})
+    check("no-kind -> waiting fallback", st["status"] == "waiting")
+    check("no-kind -> kind None", st.get("notify_kind") is None)
+    # The field is always present in the state schema (read by Session.init? in
+    # Model.swift), even when null.
+    check("notify_kind in state schema", "notify_kind" in st)
+
+    # A new turn clears a stale notify_kind.
+    st = h.compute_update(ev("Notification", _notify_kind="permission_prompt"), {})
+    st = h.compute_update(ev("UserPromptSubmit", prompt="next"), st)
+    check("new turn clears notify_kind", st["notify_kind"] is None)
+
+
+def test_arg_value():
+    """The argv reader used to pull --notify-kind must tolerate both forms and
+    absence without raising."""
+    print("argv reader:")
+    check("space form", h._arg_value(["--notify-kind", "idle_prompt"], "--notify-kind") == "idle_prompt")
+    check("equals form", h._arg_value(["--notify-kind=permission_prompt"], "--notify-kind") == "permission_prompt")
+    check("absent -> None", h._arg_value(["--other", "x"], "--notify-kind") is None)
+    check("flag last with no value -> None", h._arg_value(["--notify-kind"], "--notify-kind") is None)
+
+
+def test_install_notification_matchers():
+    """Install registers Notification under permission_prompt + idle_prompt
+    matchers (each forwarding its --notify-kind), plus a `*` fallback."""
+    print("install_hooks Notification matchers:")
+    install_path = os.path.join(os.path.dirname(__file__), "..", "install_hooks.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, HOME=tmp)
+        # Install twice to also confirm idempotency on the multi-matcher event.
+        for _ in range(2):
+            subprocess.run([sys.executable, install_path, "/usr/bin/python3 /tmp/cc_statusbar_hook.py"],
+                           env=env, capture_output=True, text=True, timeout=10)
+        with open(os.path.join(tmp, ".claude", "settings.json")) as f:
+            data = json.load(f)
+        groups = data["hooks"]["Notification"]
+        matchers = {g.get("matcher") for g in groups}
+        check("registers permission_prompt", "permission_prompt" in matchers)
+        check("registers idle_prompt", "idle_prompt" in matchers)
+        check("registers `*` fallback", "*" in matchers)
+        cmds = " ".join(hk["command"] for g in groups for hk in g.get("hooks", []))
+        check("passes permission kind arg", "--notify-kind permission_prompt" in cmds)
+        check("passes idle kind arg", "--notify-kind idle_prompt" in cmds)
+        # Idempotent: exactly the three groups we register, no duplicates.
+        ours = [g for g in groups
+                if any(hk.get("_tag") == "cc-statusbar" for hk in g.get("hooks", []))]
+        check("idempotent: exactly 3 Notification groups", len(ours) == 3)
+
+
 def test_install_hooks_idempotency():
     """install_hooks.py must be idempotent and uninstall must be a clean no-op
     when there are no hooks to remove."""
@@ -349,6 +416,9 @@ if __name__ == "__main__":
     test_error_detection_edges()
     test_state_path_sanitization()
     test_compute_update_edges()
+    test_notification_kind()
+    test_arg_value()
+    test_install_notification_matchers()
     test_install_hooks_idempotency()
     test_install_hooks_preserves_user_hooks()
     print()

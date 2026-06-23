@@ -216,6 +216,7 @@ func islandStatusWord(_ status: Status) -> String {
     switch status {
     case .running: return "Running"
     case .waiting: return "Awaiting"
+    case .done:    return ""   // never the aggregate; kept for switch totality
     case .error:   return "Error"
     case .idle:    return ""
     }
@@ -227,6 +228,7 @@ func islandWordColor(_ status: Status) -> NSColor {
     switch status {
     case .running: return IslandPalette.ink
     case .waiting: return IslandPalette.accent
+    case .done:    return IslandPalette.ink3
     case .error:   return IslandPalette.red
     case .idle:    return IslandPalette.ink3
     }
@@ -238,6 +240,7 @@ private func islandKind(for status: Status) -> IslandLabelKind {
     switch status {
     case .running: return .running
     case .waiting: return .waiting
+    case .done:    return .idle   // calm: render the done state like idle on the island
     case .error:   return .error
     case .idle:    return .idle
     }
@@ -950,6 +953,9 @@ final class IslandHostView: NSView {
             if let e = s.lastError, !e.isEmpty {
                 sub.append(NSAttributedString(string: " · " + islandTruncate(e, 28), attributes: normalAttrs))
             }
+        case .done:
+            sub.append(NSAttributedString(string: "done", attributes: boldAttrs))
+            sub.append(NSAttributedString(string: " · " + relativeAge(s.updatedAt), attributes: normalAttrs))
         case .idle:
             sub.append(NSAttributedString(string: "idle", attributes: normalAttrs))
         }

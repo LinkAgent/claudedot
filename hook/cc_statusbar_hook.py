@@ -24,8 +24,13 @@ State file schema (one per active session):
   "updated_at": float,      # epoch seconds
   "pending_tool": str|null, # tool awaiting approval (set on PreToolUse)
   "pending_input": str|null,# short summary of that tool's input
+  "notify_kind": str|null,  # "permission_prompt" | "idle_prompt" (set on Notification)
   "ended": bool             # set on SessionEnd
 }
+
+Notification matcher: the precise "Needs You" signal. Invoked per-kind from
+settings.json as `... --notify-kind permission_prompt|idle_prompt` (the payload
+has no type field — claude-code#11964), so the kind comes in on the command line.
 """
 
 import json
@@ -112,6 +117,18 @@ def _pending_summary(payload):
     return None
 
 
+def _classify_notification(message):
+    """Fallback classification when no --notify-kind arg was passed (a catch-all
+    matcher or a legacy install). Claude Code's Notification payload carries no
+    type field (claude-code#11964), so sniff the message text. Default to the
+    urgent permission_prompt so an approval is never silently swallowed as a
+    gentle reminder."""
+    m = (message or "").lower()
+    if "waiting for your input" in m or "idle" in m:
+        return "idle_prompt"
+    return "permission_prompt"
+
+
 def _detect_tool_error(payload):
     """Best-effort: did this PostToolUse report a failure?
 
@@ -148,6 +165,9 @@ def compute_update(payload, prev):
     state.setdefault("error_at", None)
     state.setdefault("pending_tool", None)
     state.setdefault("pending_input", None)
+    # The Notification kind is only meaningful for the event that set it; clear
+    # it on every other event so a stale "permission_prompt" can't linger.
+    state["notify_kind"] = None
     state["ended"] = False
 
     def clear_pending():
@@ -205,9 +225,19 @@ def compute_update(payload, prev):
         clear_pending()
 
     elif event == "Notification":
+        # The precise "Needs You" signal, subdivided by matcher (issue #30):
+        #   permission_prompt -> urgent: blocked on your approval -> waiting.
+        #   idle_prompt       -> gentle "you've been away"; the turn already
+        #                        ended, so do NOT escalate to the urgent waiting
+        #                        state (that would nag the owl for an idle chat).
         msg = payload.get("message", "needs your attention")
-        state["status"] = "waiting"
+        kind = payload.get("_notify_kind") or _classify_notification(msg)
+        state["notify_kind"] = kind
         state["last_event"] = _truncate(msg, 100)
+        if kind == "idle_prompt":
+            state.setdefault("status", "idle")
+        else:
+            state["status"] = "waiting"
 
     elif event == "Stop":
         # The agent's turn ended. We do NOT flip to waiting here: every reply
@@ -246,6 +276,16 @@ def main():
         payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         payload = {}
+
+    # Notification kind arrives on the command line (--notify-kind <kind>) because
+    # the payload has no type field. Inject it so compute_update can read it.
+    try:
+        if "--notify-kind" in sys.argv:
+            i = sys.argv.index("--notify-kind")
+            if i + 1 < len(sys.argv):
+                payload["_notify_kind"] = sys.argv[i + 1]
+    except Exception:
+        pass
 
     try:
         session_id = payload.get("session_id", "unknown")

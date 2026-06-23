@@ -24,11 +24,17 @@ EVENTS = {
     "UserPromptSubmit": False,
     "PreToolUse": True,
     "PostToolUse": True,
-    "Notification": False,
+    "Notification": False,  # registered specially below, one group per kind
     "Stop": False,
     "SubagentStop": False,
     "SessionEnd": False,
 }
+
+# Notification is the precise "Needs You" signal. Its payload carries no type
+# field (claude-code#11964), so we register a separate matcher per kind and pass
+# the kind to the hook as `--notify-kind <kind>`; the hook then differentiates an
+# urgent permission prompt from a gentle idle reminder. (See issue #30.)
+NOTIFY_KINDS = ["permission_prompt", "idle_prompt"]
 
 
 def load():
@@ -87,11 +93,16 @@ def install(command):
     for event, has_matcher in EVENTS.items():
         groups = hooks.get(event, [])
         groups = strip_ours(groups)  # remove stale copies first (idempotent)
-        entry = {"type": "command", "command": command, "_tag": TAG}
-        if has_matcher:
-            groups.append({"matcher": "*", "hooks": [entry]})
+        if event == "Notification":
+            # One matcher-scoped group per kind, each passing --notify-kind.
+            for kind in NOTIFY_KINDS:
+                k_entry = {"type": "command",
+                           "command": f"{command} --notify-kind {kind}", "_tag": TAG}
+                groups.append({"matcher": kind, "hooks": [k_entry]})
+        elif has_matcher:
+            groups.append({"matcher": "*", "hooks": [{"type": "command", "command": command, "_tag": TAG}]})
         else:
-            groups.append({"hooks": [entry]})
+            groups.append({"hooks": [{"type": "command", "command": command, "_tag": TAG}]})
         hooks[event] = groups
     save(data)
     print(f"Installed status-bar hooks for {len(EVENTS)} events into {SETTINGS}")
@@ -141,11 +152,13 @@ def diagnose():
                 elif HOOK_BASENAME in (hook.get("command") or ""):
                     ours_count += 1
                     legacy += 1
+        # Notification legitimately has one entry per kind; everything else one.
+        expected = len(NOTIFY_KINDS) if event == "Notification" else 1
         flag = ""
         if ours_count == 0:
             flag = " MISSING"
             problems += 1
-        elif ours_count > 1:
+        elif ours_count > expected:
             flag = f" DUPLICATE ({tagged} tagged, {legacy} legacy)"
             problems += 1
         print(f"  {event:<18s} {ours_count} ours{flag}")

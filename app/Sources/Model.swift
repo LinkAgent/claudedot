@@ -128,6 +128,19 @@ struct Session {
 // is treated as idle so a finished session settles quickly in the aggregate.
 let runningLivenessWindow: Double = 90
 
+// How long a session whose transcript tail ends MID-WORK (an executing tool or
+// the agent's own turn) still counts as running while the transcript is silent.
+// This is deliberately MUCH longer than runningLivenessWindow: a tail of
+// `.runningTool` / `.userTurn` means the agent is *expecting more output* (a tool
+// is in flight, the agent is mid-turn) — categorically different from a finished
+// turn. A long-running tool — most notably a subagent (the `Agent` tool), but
+// also a long Bash / WebFetch — appends NOTHING to the transcript until it
+// returns, so a genuinely-busy session would otherwise decay to idle and vanish
+// from the bar after just 90s of tool silence (the badge under-counts). A dead
+// session can't stall here — the native registry drops it the instant its pid
+// dies (kill(pid,0)); only an alive-but-slow tool lives in this window.
+let toolLivenessWindow: Double = 15 * 60
+
 // MARK: - Native session registry
 // Claude Code itself writes ~/.claude/sessions/<pid>.json for every running
 // session. This is the authoritative list of ALL running tasks (independent of
@@ -377,7 +390,9 @@ func filterWelcomeSessions(_ sessions: [DesktopSession],
 //     long it's been quiet — the agent is blocked on your answer, and that quiet
 //     IS the wait.
 //   • `.runningTool` / `.userTurn` → a tool is executing or the agent is mid-turn:
-//     running only while fresh; a stale one stalled/crashed → idle.
+//     running while within `toolLivenessWindow` (long — covers a subagent / long
+//     Bash that appends nothing until it returns); only a tool silent past that
+//     (stalled/crashed) → idle.
 //   • `.finished` → the agent ENDED its turn (a `Stop`). It is NOT running just
 //     because the file is fresh (the issue #31 bug). Surface as `.done` ("needs
 //     review") only while recent AND unviewed (last write newer than
@@ -390,7 +405,11 @@ func inferDesktopStatus(tail: TranscriptTail, mtime: Double, lastFocusedAt: Doub
     case .blocking:
         return .waiting
     case .runningTool, .userTurn:
-        return (now - mtime < runningLivenessWindow) ? .running : .idle
+        // Mid-work tail: a tool is executing or the agent is mid-turn. Keep it
+        // running across a long, transcript-silent tool call (subagents, long
+        // Bash/WebFetch) — see toolLivenessWindow. Only a tool stuck for >15min
+        // (with a still-alive pid) decays to idle as a stalled/crashed safeguard.
+        return (now - mtime < toolLivenessWindow) ? .running : .idle
     case .finishedAsking:
         // Agent finished its turn ENDING ON A QUESTION → your turn to answer.
         // Counts as "Needs input" only when BOTH (a) the question is recent and

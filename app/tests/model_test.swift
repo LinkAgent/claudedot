@@ -329,12 +329,18 @@ check("asking but never focused -> idle",
 
 check("fresh executing tool -> running",
       inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - 5, now: now) == .running)
-check("stale executing tool -> idle (stalled, not finished)",
-      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - 200, now: now) == .idle)
+// A mid-work tail stays running across a long, transcript-silent tool call (e.g.
+// a subagent): 200s of silence is well within toolLivenessWindow — NOT idle.
+check("executing tool quiet 200s -> still running (long tool, not stalled)",
+      inferDesktopStatus(tail: .runningTool("Agent"), mtime: now - 200, now: now) == .running)
+check("executing tool past toolLivenessWindow -> idle (stalled/crashed)",
+      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - (toolLivenessWindow + 1), now: now) == .idle)
 check("fresh user turn -> running (agent about to continue)",
       inferDesktopStatus(tail: .userTurn, mtime: now - 5, now: now) == .running)
-check("stale user turn -> idle",
-      inferDesktopStatus(tail: .userTurn, mtime: now - 200, now: now) == .idle)
+check("user turn quiet 200s -> still running",
+      inferDesktopStatus(tail: .userTurn, mtime: now - 200, now: now) == .running)
+check("user turn past toolLivenessWindow -> idle",
+      inferDesktopStatus(tail: .userTurn, mtime: now - (toolLivenessWindow + 1), now: now) == .idle)
 check("blocking AskUserQuestion -> waiting (no matter how quiet)",
       inferDesktopStatus(tail: .blocking("AskUserQuestion"), mtime: now - 99999, now: now) == .waiting)
 check("blocking ExitPlanMode -> waiting",
@@ -578,11 +584,11 @@ check("stale waiting persists in aggregate",
       aggregateStatus([staleWait], now: now) == .waiting)
 
 // inferDesktopStatus liveness boundary (>=, not >) governs an EXECUTING tail:
-// at exactly 90s it's stale → idle; just under → running.
-check("executing tail exactly at 90s -> idle (stalled)",
-      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - runningLivenessWindow, now: now) == .idle)
-check("executing tail just under 90s -> running",
-      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - (runningLivenessWindow - 1), now: now) == .running)
+// at exactly toolLivenessWindow it's stale → idle; just under → running.
+check("executing tail exactly at toolLivenessWindow -> idle (stalled)",
+      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - toolLivenessWindow, now: now) == .idle)
+check("executing tail just under toolLivenessWindow -> running",
+      inferDesktopStatus(tail: .runningTool("Bash"), mtime: now - (toolLivenessWindow - 1), now: now) == .running)
 // A finished tail is never "running" no matter how fresh: a completed turn is
 // idle (hidden), one that ends asking is "needs input" (done) — never running.
 check("fresh completed tail -> idle (never running)",
